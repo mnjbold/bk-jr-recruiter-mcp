@@ -36,13 +36,13 @@ from .mcp_server import mcp
 mcp.settings.stateless_http = True
 
 
-def health_app(scope, receive, send):
+async def health_app(scope, receive, send):
     """Minimal ASGI app for the /health endpoint. No auth required."""
     if scope["type"] != "http":
         return
     if scope["path"] != "/health":
-        send({"type": "http.response.start", "status": 404, "headers": []})
-        send({"type": "http.response.body", "body": b""})
+        await send({"type": "http.response.start", "status": 404, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
         return
     body = json.dumps({
         "status": "ok",
@@ -51,7 +51,7 @@ def health_app(scope, receive, send):
         "tools": 24,
         "auth": "bearer-required",
     }).encode()
-    send({
+    await send({
         "type": "http.response.start",
         "status": 200,
         "headers": [
@@ -59,7 +59,7 @@ def health_app(scope, receive, send):
             (b"content-length", str(len(body)).encode()),
         ],
     })
-    send({"type": "http.response.body", "body": body})
+    await send({"type": "http.response.body", "body": body})
 
 
 def _extract_bearer(headers):
@@ -80,9 +80,9 @@ def _expected_token():
     return os.environ.get("MCP_AUTH_TOKEN") or os.environ.get("SMS_AGENT_API_KEY") or ""
 
 
-def _send_401(send, msg):
+async def _send_401(send, msg):
     body = json.dumps({"error": "unauthorized", "message": msg}).encode()
-    send({
+    await send({
         "type": "http.response.start",
         "status": 401,
         "headers": [
@@ -91,17 +91,17 @@ def _send_401(send, msg):
             (b"content-length", str(len(body)).encode()),
         ],
     })
-    send({"type": "http.response.body", "body": body})
+    await send({"type": "http.response.body", "body": body})
 
 
-def _send_404(send):
+async def _send_404(send):
     body = b""
-    send({
+    await send({
         "type": "http.response.start",
         "status": 404,
         "headers": [(b"content-length", b"0")],
     })
-    send({"type": "http.response.body", "body": body})
+    await send({"type": "http.response.body", "body": body})
 
 
 async def dispatcher(scope, receive, send):
@@ -113,6 +113,17 @@ async def dispatcher(scope, receive, send):
       - /mcp/xxx           -> requires bearer auth, then MCP server
       - everything else    -> 404
     """
+    # Handle lifespan events so uvicorn doesn't hang on startup
+    if scope["type"] == "lifespan":
+        while True:
+            message = await receive()
+            if message["type"] == "lifespan.startup":
+                await send({"type": "lifespan.startup.complete"})
+            elif message["type"] == "lifespan.shutdown":
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+        return
+
     if scope["type"] != "http":
         return
 
@@ -129,10 +140,10 @@ async def dispatcher(scope, receive, send):
         token = _extract_bearer(scope.get("headers") or [])
         expected = _expected_token()
         if not expected:
-            _send_401(send, "server has no auth token configured; set MCP_AUTH_TOKEN")
+            await _send_401(send, "server has no auth token configured; set MCP_AUTH_TOKEN")
             return
         if not token or token != expected:
-            _send_401(send, "invalid or missing bearer token")
+            await _send_401(send, "invalid or missing bearer token")
             return
 
         # Auth passed — route to the MCP server. Use /mcp as the canonical path
@@ -149,7 +160,7 @@ async def dispatcher(scope, receive, send):
         return
 
     # 404
-    _send_404(send)
+    await _send_404(send)
 
 
 def main() -> None:
