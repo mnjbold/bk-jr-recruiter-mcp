@@ -7,7 +7,7 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the MCP server code
+# Copy the MCP server code (both backend + MCP live in this same tree)
 COPY retell-quo-server/ /app/
 
 # Install Python deps
@@ -19,11 +19,14 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir "mcp>=1.9.0,<2.0.0" "starlette<0.38" httpx
 
 # Sanity check
-RUN python -c "import src.mcp_server, src.mcp_main; print('Modules loaded OK')"
+RUN python -c "import src.mcp_server, src.mcp_main, src.server; print('Modules loaded OK')"
 
-# Run the MCP server via the FastAPI wrapper (with bearer auth + no trailing-slash redirect)
+# Use the MODE env var to choose which process to run.
+# - MODE=backend (default) -> uvicorn src.server:app
+# - MODE=mcp                -> python -m src.mcp_main (the auth-wrapped MCP dispatcher)
+# Render sets this per service in render.yaml.
+ENV MODE=backend
 ENV PORT=8080
-ENV BACKEND_URL=https://bk-jr-api.aixlabs.fun
 EXPOSE 8080
 
-CMD ["python", "-m", "src.mcp_main", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["sh", "-c", "if [ \"$MODE\" = \"mcp\" ]; then python -m src.mcp_main --host 0.0.0.0 --port ${PORT:-8080}; else exec uvicorn src.server:app --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers --forwarded-allow-ips='*'; fi"]
