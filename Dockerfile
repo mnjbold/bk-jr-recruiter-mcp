@@ -22,15 +22,15 @@ RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir "mcp>=1.9.0,<2.0.0" "starlette<0.38" httpx
 
-# Sanity check
-RUN python -c "import src.mcp_server, src.mcp_main, src.server; print('Modules loaded OK')"
-
 # Use the MODE env var to choose which process to run.
-# - MODE=backend (default) -> uvicorn src.server:app
-# - MODE=mcp                -> python -m src.mcp_main (the auth-wrapped MCP dispatcher)
-# Render sets this per service in render.yaml.
+# Render sets this per service in render.yaml. Both services share one image.
 ENV MODE=backend
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["sh", "-c", "if [ \"$MODE\" = \"mcp\" ]; then python -m src.mcp_main --host 0.0.0.0 --port ${PORT:-8080}; else exec uvicorn src.server:app --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers --forwarded-allow-ips='*'; fi"]
+# Mode-switching entrypoint script — written as a separate file so the JSON
+# array CMD can stay simple (avoids quoting hell in the array form).
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+CMD ["/app/entrypoint.sh"]
