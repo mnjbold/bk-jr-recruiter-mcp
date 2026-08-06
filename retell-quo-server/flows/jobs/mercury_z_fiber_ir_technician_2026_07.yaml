@@ -1,0 +1,84 @@
+job_id: mercury_z_fiber_ir_technician_2026_07
+title: "Fiber I&R Technician"
+company: "Mercury Z"
+locations:
+  - "Alachua, FL"
+  - "Granite Quarry, NC"
+  - "Wadesboro, NC"
+contract_type: "1099"
+duration: "2+ years (long term)"
+schedule: "6 days/week (Mon–Sat)"
+per_diem: true
+requirements:
+  - "iPhone 11 or above"
+  - "Truck or work van in good condition with a ladder rack and 28ft ladder"
+notes: "Spots are first come, first serve."
+
+sms_templates:
+  initial: |
+    Hi {name},
+    We have new requirements for Fiber I&R Technicians for the following locations:
+    {locations_bullets}
+
+    Details:
+    * This is a 1099 long term project for 2+ years.
+    * Work 6 days a week (Mon through Sat)
+    * Per diem will be provided for the days worked
+
+    Requirements:
+    {requirements_bullets}
+
+    Spots are on first come first serve basis.
+    If you are interested, please reply YES and I will reach out to you for further discussion.
+    Thank You.
+    BK
+    Mercury Z
+
+  # Sent IMMEDIATELY before the AI screening call — tells the candidate what
+  # number is about to ring so they pick up instead of ignoring an unknown caller.
+  # Two-number strategy: SMS from BK's Quo number (so it threads with the initial
+  # outreach), call from the dedicated Retell number. Spam-flag-safe because the
+  # candidate just replied YES to the first text.
+  screening_call_pre_notice: |
+    Hi {name}! BK's AI recruiting team will call you from {call_from_number} in about 30 seconds to confirm a few quick details for the {title} role. Please pick up — it's a 2-minute call. Thanks!
+
+  # Post-call courtesy (still useful — thanks the candidate, leaves a paper trail).
+  screening_call_followup: |
+    Thanks {name}! You'll get a quick call in a few minutes from BK's team to
+    confirm a few details and lock in your spot. Please pick up.
+
+screening_call:
+  enabled: true
+  # Set after creating/publishing the Retell agent (one generic recruiting-screener
+  # agent reused across every job posting — see requirements doc).
+  agent_id: "agent_c530f8a10e8a502798c49a30c6"
+  # Optional: BK's cloned voice (e.g. an ElevenLabs/Cartesia custom voice id
+  # registered in Retell's voice library). Leave blank to use the agent's
+  # default voice. This affects how the call SOUNDS, not what number it comes
+  # from — see requirements doc § voice cloning vs. number reuse.
+  voice_id: ""
+  # How long to wait AFTER the pre-notice SMS lands before placing the Retell
+  # call. 10s = long enough for the SMS to deliver, short enough that the
+  # candidate is still holding the phone from reading the text. Tune up if
+  # candidates are saying "the call came before the text".
+  pre_notice_delay_seconds: 10
+  questions:
+    - "Confirm you currently have an iPhone 11 or newer."
+    - "Confirm you have a truck or work van in good condition, with a ladder rack and a 28ft ladder."
+    - "Confirm you can commit to 6 days a week (Mon-Sat) for a 2+ year 1099 engagement."
+    - "Which location works best for you: Alachua FL, Granite Quarry NC, or Wadesboro NC?"
+    - "Ask when they could realistically start."
+  # Maps to post_call_analysis_data configured on the Retell agent (dashboard side).
+  # Names below must match the `name` field of each AnalysisData entry there.
+  custom_analysis_fields:
+    - name: has_iphone_11_plus
+      type: boolean
+    - name: has_vehicle_with_ladder_rack
+      type: boolean
+    - name: can_commit_schedule
+      type: boolean
+    - name: preferred_location
+      type: string
+    - name: screening_result
+      type: enum
+      choices: ["passed", "failed", "needs_follow_up"]

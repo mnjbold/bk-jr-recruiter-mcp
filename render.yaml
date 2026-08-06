@@ -1,5 +1,10 @@
 # Render Blueprint for BK Jr. — TWO services: backend + MCP.
-# Both use the same Docker image. CMD/entrypoint differs per service.
+# Both use the same Docker image. The Dockerfile's CMD switches on $MODE:
+#   MODE=backend (default) -> uvicorn src.server:app
+#   MODE=mcp                -> python -m src.mcp_main (auth-wrapped MCP dispatcher)
+#
+# IMPORTANT: the BACKEND service does NOT need BACKEND_URL — it IS the backend.
+# The MCP service points BACKEND_URL at the BACKEND service.
 
 services:
   # === 1. The FastAPI backend (the actual work) ===
@@ -9,11 +14,11 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     plan: starter
-    # Override CMD to run the backend (uvicorn on port 8080) instead of the MCP
-    entrypoint: ["python", ".run_backend.py"]
     healthCheckPath: /health
     autoDeploy: true
     envVars:
+      - key: MODE
+        value: backend
       - key: PORT
         value: "8080"
       - key: PYTHONUNBUFFERED
@@ -47,8 +52,6 @@ services:
         value: "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJpYXQiOjE3ODIyMjcyMzgsImlkIjoiMDE5ZWQ1MzgtYjUwMS03ZmFjLWI5MGItODdjY2JlNmQ5YzdkIiwicmlkIjoiODk5MDU2MzUtZDc5MC00YzMwLWI0ODItOTI2NjUwN2JkYmEzIn0.ya1l5NSYOkzXowKRZ1A__NSoFZoa6mB9Gj1g90UUH4Pr8FDkEnvgMoEoYqsT9bPbgNTRuy6vZ6M5lPlP7kZgAg"
       - key: BOLD_DB_PATH
         value: "bold_connect_replica.db"
-      - key: BACKEND_URL
-        value: "http://127.0.0.1:8080"
       - key: AUTH_JWT_SECRET
         value: "926ed5458f6429f2f9100909cee633842fbf4b26deb655c552f12c852e5feec9"
       - key: BOLD_TEAM_SECRET
@@ -85,24 +88,24 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     plan: starter
-    # Override CMD to run the MCP wrapper (streamable HTTP on port 8080)
-    entrypoint: ["python", "-m", "src.mcp_main", "--host", "0.0.0.0", "--port", "8080"]
     healthCheckPath: /health
     autoDeploy: true
     envVars:
+      - key: MODE
+        value: mcp
       - key: PORT
         value: "8080"
       - key: PYTHONUNBUFFERED
         value: "1"
-      # === KEY FIX: point at the Render-hosted BACKEND, not the local cloudflared tunnel ===
+      # === KEY FIX: point at the Render-hosted BACKEND service, not localhost ===
       - key: BACKEND_URL
         value: https://bk-jr-recruiter-backend.onrender.com
       - key: MCP_TRANSPORT
         value: http
       # === Auth (REQUIRED — clients send Authorization: Bearer <MCP_AUTH_TOKEN>) ===
-      # Override this in the Render dashboard with a strong random string.
+      # Label: mcp-bk-junior-by-bait-team (per W3J's 2026-08-07 directive)
       - key: MCP_AUTH_TOKEN
-        value: CHANGE-ME-IN-RENDER-DASHBOARD-32-CHARS-MIN
+        value: "jsU13b_-77ERcNY5TZBeAsTP1Nc37vxO11nvwSq9L6wB_dih"
       # === Same API keys so the MCP can call Quo/Retell/Composio directly if needed ===
       - key: OPENPHONE_API_KEY
         value: "6efefb9a6bf78b8ade2e1483e1fadbbb6e10e137a2fc210224ccb3064d66da0c"
