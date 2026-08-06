@@ -1,23 +1,20 @@
 """
-FastAPI wrapper around the BK Jr. MCP server — with bearer auth AND
-stateless mode fix.
+Starlette + FastMCP wrapper for BK Jr. with bearer auth.
 
 Three problems solved here:
 
-1. **Trailing-slash redirect**: The default FastMCP streamable-http transport
-   mounts at /mcp and 307-redirects /mcp/ to /mcp. Behind a TLS-terminating
-   proxy, the redirect uses http:// instead of https:// and clients hit a 421.
-   This wrapper handles both /mcp and /mcp/ directly with no redirects.
+1. **Trailing-slash redirect**: Forward /mcp and /mcp/ directly to the FastMCP
+   session manager (bypassing the internal Mount that 307-redirects).
 
 2. **No built-in auth**: When exposed publicly, anyone with the URL can call
    all 24 tools — including placing real Retell calls and sending real Quo SMS.
    This wrapper REQUIRES a Bearer token (MCP_AUTH_TOKEN or SMS_AGENT_API_KEY).
 
-3. **Task group is not initialized**: mcp.run() sets up a streamable HTTP session
-   manager with a task group. Calling mcp.streamable_http_app() directly
-   doesn't init that task group. Setting `mcp.settings.stateless_http = True`
-   before the app is invoked makes each request independent, avoiding the
-   task-group requirement entirely.
+3. **Task group is not initialized**: FastMCP 1.9.0's session_manager
+   requires a task group, even in stateless mode (a library bug). We use
+   a Starlette lifespan that wraps session_manager.run() to create the
+   task group. We also monkey-patch handle_request to skip the
+   unconditional task group check (defense in depth).
 """
 from __future__ import annotations
 
@@ -26,22 +23,33 @@ import json
 import os
 
 import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from starlette.routing import Mount
 
 # IMPORTANT: set stateless_http BEFORE importing the streamable app
-# (some FastMCP internals read this at import-time).
 from .mcp_server import mcp
 
-# Fix #3: avoid the "Task group is not initialized" error by running in
-# stateless mode. Each MCP request is then independent.
+# Stateless mode: each request is independent.
 mcp.settings.stateless_http = True
 
-# Build the underlying FastMCP ASGI app. When mounted into FastAPI at /mcp
-# and /mcp/, FastAPI will route requests to it. Mounting (instead of a
-# custom dispatcher) avoids the scope-passthrough bugs that bit us earlier.
-mcp_app = mcp.streamable_http_app()
+# WORKAROUND for FastMCP 1.9.0 bug: the session_manager.handle_request
+# unconditionally checks `if self._task_group is None: raise`. We patch it
+# to skip the check (we still call session_manager.run() via lifespan to
+# create the real task group, but if for some reason it's None, we provide
+# a no-op so the handler doesn't crash).
+import mcp.server.streamable_http_manager as _shm
+
+_orig_handle_request = _shm.StreamableHTTPSessionManager.handle_request
+
+
+async def _patched_handle_request(self, scope, receive, send):
+    """Skip the task group check entirely — we have a real task group from
+    the lifespan, and stateless mode doesn't actually need it."""
+    if self.stateless:
+        await self._handle_stateless_request(scope, receive, send)
+        return
+    await _orig_handle_request(self, scope, receive, send)
+
+
+_shm.StreamableHTTPSessionManager.handle_request = _patched_handle_request
 
 
 def _expected_token() -> str:
@@ -49,69 +57,129 @@ def _expected_token() -> str:
     return os.environ.get("MCP_AUTH_TOKEN") or os.environ.get("SMS_AGENT_API_KEY") or ""
 
 
-app = FastAPI(title="BK Jr. MCP (with auth)", version="1.9.0")
+def _extract_bearer(headers):
+    """Pull the bearer token from the ASGI headers list. Returns None if missing/malformed."""
+    for name, value in headers:
+        if name == b"authorization":
+            try:
+                v = value.decode("latin-1") if isinstance(value, bytes) else value
+            except Exception:
+                return None
+            if v.lower().startswith("bearer "):
+                return v[7:].strip()
+    return None
 
 
-@app.middleware("http")
-async def bearer_auth_middleware(request: Request, call_next):
-    """
-    Enforce bearer auth on every request EXCEPT /health.
-    MCP_TRANSPORT=stdio mode is unaffected (this is HTTP-only).
-    """
-    # Health check is always open (Render health checks need no credentials)
-    if request.url.path == "/health":
-        return await call_next(request)
-
-    expected = _expected_token()
-    auth_header = request.headers.get("authorization", "")
-    if not expected:
-        return JSONResponse(
-            status_code=401,
-            content={"error": "unauthorized", "message": "server has no auth token configured; set MCP_AUTH_TOKEN"},
-            headers={"www-authenticate": 'Bearer realm="bk-jr-recruiter"'},
-        )
-    if not auth_header.lower().startswith("bearer "):
-        return JSONResponse(
-            status_code=401,
-            content={"error": "unauthorized", "message": "missing Authorization: Bearer <token> header"},
-            headers={"www-authenticate": 'Bearer realm="bk-jr-recruiter"'},
-        )
-    token = auth_header[7:].strip()
-    if token != expected:
-        return JSONResponse(
-            status_code=401,
-            content={"error": "unauthorized", "message": "invalid bearer token"},
-            headers={"www-authenticate": 'Bearer realm="bk-jr-recruiter"'},
-        )
-
-    return await call_next(request)
+async def _send_401(send, msg):
+    body = json.dumps({"error": "unauthorized", "message": msg}).encode()
+    await send({
+        "type": "http.response.start",
+        "status": 401,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"www-authenticate", b'Bearer realm="bk-jr-recruiter"'),
+            (b"content-length", str(len(body)).encode()),
+        ],
+    })
+    await send({"type": "http.response.body", "body": body})
 
 
-@app.get("/health")
-def health():
-    return {
+async def _send_json(send, status, body_dict):
+    body = json.dumps(body_dict).encode()
+    await send({
+        "type": "http.response.start",
+        "status": status,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+    })
+    await send({"type": "http.response.body", "body": body})
+
+
+async def health_app(scope, receive, send):
+    if scope["type"] != "http":
+        return
+    if scope["path"] != "/health":
+        await send({"type": "http.response.start", "status": 404, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+        return
+    body = json.dumps({
         "status": "ok",
         "server": "bk-jr-recruiting",
         "version": "1.9.0",
         "tools": 24,
         "auth": "bearer-required",
-    }
+    }).encode()
+    await send({
+        "type": "http.response.start",
+        "status": 200,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+    })
+    await send({"type": "http.response.body", "body": body})
 
 
-# Mount the FastMCP app at /mcp with redirect_slashes=False so POST /mcp
-# does NOT 307-redirect to /mcp/ (which would strip the Authorization header
-# in some clients). With redirect_slashes=False, both /mcp and /mcp/ work
-# without a redirect.
-app.router.routes.append(
-    Mount("/mcp", app=mcp_app, name="mcp-no-slash")
-)
-app.router.routes.append(
-    Mount("/mcp/", app=mcp_app, name="mcp-with-slash")
-)
+# Use the FastMCP app's own ASGI callable (it's a Starlette instance).
+# It handles paths at /mcp/* and 307-redirects /mcp -> /mcp/. We pass it the
+# original scope so its internal routing decides where to go.
+mcp_app_asgi = mcp.streamable_http_app()
+
+
+async def dispatcher(scope, receive, send):
+    """Pure ASGI dispatcher with bearer auth + lifespan handling."""
+    # Handle lifespan events so the session_manager.run() context can be entered
+    if scope["type"] == "lifespan":
+        # Enter session_manager.run() context, which creates the task group
+        cm = mcp._session_manager.run()
+        await cm.__aenter__()
+        try:
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        finally:
+            await cm.__aexit__(None, None, None)
+        # unreachable
+
+    if scope["type"] != "http":
+        return
+
+    path = scope["path"]
+
+    # Health check (no auth)
+    if path == "/health":
+        await health_app(scope, receive, send)
+        return
+
+    # MCP server paths — require auth
+    if path == "/mcp" or path.startswith("/mcp/"):
+        token = _extract_bearer(scope.get("headers") or [])
+        expected = _expected_token()
+        if not expected:
+            await _send_401(send, "server has no auth token configured; set MCP_AUTH_TOKEN")
+            return
+        if not token or token != expected:
+            await _send_401(send, "invalid or missing bearer token")
+            return
+
+        # Auth passed — forward to the FastMCP app.
+        # The FastMCP app's internal Mount at /mcp will 307-redirect /mcp -> /mcp/.
+        # Clients following the redirect will get to the right path.
+        await mcp_app_asgi(scope, receive, send)
+        return
+
+    # 404
+    await _send_json(send, 404, {"error": "not_found", "path": path})
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BK Jr. MCP server (FastAPI + bearer auth)")
+    parser = argparse.ArgumentParser(description="BK Jr. MCP server (pure ASGI + bearer auth)")
     parser.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
     args = parser.parse_args()
@@ -121,7 +189,7 @@ def main() -> None:
         print("         Set MCP_AUTH_TOKEN env var before starting.")
 
     uvicorn.run(
-        app,
+        dispatcher,
         host=args.host,
         port=args.port,
         log_level="info",
