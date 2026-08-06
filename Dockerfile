@@ -10,6 +10,10 @@ RUN apt-get update -qq && apt-get install -y --no-install-recommends \
 # Copy the MCP server code (both backend + MCP live in this same tree)
 COPY retell-quo-server/ /app/
 
+# Belt-and-suspenders: remove any __pycache__ from the COPY (they may carry
+# .pyc files from a different Python version, which break imports).
+RUN find /app -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
 # Install Python deps
 # CRITICAL pins (verified live 2026-08-07):
 #   - mcp<2.0.0: v2.0.0 removed `mcp.server.fastmcp`
