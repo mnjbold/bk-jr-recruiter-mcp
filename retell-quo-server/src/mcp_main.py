@@ -122,10 +122,11 @@ async def health_app(scope, receive, send):
     await send({"type": "http.response.body", "body": body})
 
 
-# Use the FastMCP app's own ASGI callable (it's a Starlette instance).
-# It handles paths at /mcp/* and 307-redirects /mcp -> /mcp/. We pass it the
-# original scope so its internal routing decides where to go.
-mcp_app_asgi = mcp.streamable_http_app()
+# Get the FastMCP session manager (we bypass the Mount at /mcp that does
+# the 307-redirect). The session manager is created lazily by streamable_http_app().
+# Call it once to force creation, then grab the manager.
+_mcp_app = mcp.streamable_http_app()  # forces session_manager creation
+mcp_session_manager = mcp._session_manager
 
 
 async def dispatcher(scope, receive, send):
@@ -133,7 +134,7 @@ async def dispatcher(scope, receive, send):
     # Handle lifespan events so the session_manager.run() context can be entered
     if scope["type"] == "lifespan":
         # Enter session_manager.run() context, which creates the task group
-        cm = mcp._session_manager.run()
+        cm = mcp_session_manager.run()
         await cm.__aenter__()
         try:
             while True:
@@ -157,7 +158,7 @@ async def dispatcher(scope, receive, send):
         await health_app(scope, receive, send)
         return
 
-    # MCP server paths — require auth
+    # MCP server paths — require auth, then call the session manager directly
     if path == "/mcp" or path.startswith("/mcp/"):
         token = _extract_bearer(scope.get("headers") or [])
         expected = _expected_token()
@@ -168,18 +169,10 @@ async def dispatcher(scope, receive, send):
             await _send_401(send, "invalid or missing bearer token")
             return
 
-        # Auth passed — forward to the FastMCP app.
-        # Rewrite the path so /mcp becomes /mcp/ (the canonical path the
-        # FastMCP Mount expects). This avoids the internal 307 redirect
-        # which breaks the request on Render (the redirected URL hits a
-        # Host header validation issue).
-        if path == "/mcp":
-            new_scope = dict(scope)
-            new_scope["path"] = "/mcp/"
-            new_scope["raw_path"] = b"/mcp/"
-            scope = new_scope
-
-        await mcp_app_asgi(scope, receive, send)
+        # Auth passed — call the session manager's _handle_stateless_request
+        # directly. This bypasses the FastMCP app's internal Mount (which does
+        # a 307 redirect) and the handle_request task_group check (monkey-patched).
+        await mcp_session_manager._handle_stateless_request(scope, receive, send)
         return
 
     # 404
