@@ -169,8 +169,16 @@ async def dispatcher(scope, receive, send):
             return
 
         # Auth passed — forward to the FastMCP app.
-        # The FastMCP app's internal Mount at /mcp will 307-redirect /mcp -> /mcp/.
-        # Clients following the redirect will get to the right path.
+        # Rewrite the path so /mcp becomes /mcp/ (the canonical path the
+        # FastMCP Mount expects). This avoids the internal 307 redirect
+        # which breaks the request on Render (the redirected URL hits a
+        # Host header validation issue).
+        if path == "/mcp":
+            new_scope = dict(scope)
+            new_scope["path"] = "/mcp/"
+            new_scope["raw_path"] = b"/mcp/"
+            scope = new_scope
+
         await mcp_app_asgi(scope, receive, send)
         return
 
