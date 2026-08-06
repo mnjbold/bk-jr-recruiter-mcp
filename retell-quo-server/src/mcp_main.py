@@ -1,5 +1,5 @@
 """
-Pure ASGI wrapper around the BK Jr. MCP server — with bearer auth AND
+FastAPI wrapper around the BK Jr. MCP server — with bearer auth AND
 stateless mode fix.
 
 Three problems solved here:
@@ -26,6 +26,8 @@ import json
 import os
 
 import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 # IMPORTANT: set stateless_http BEFORE importing the streamable app
 # (some FastMCP internals read this at import-time).
@@ -35,136 +37,74 @@ from .mcp_server import mcp
 # stateless mode. Each MCP request is then independent.
 mcp.settings.stateless_http = True
 
+# Build the underlying FastMCP ASGI app. When mounted into FastAPI at /mcp
+# and /mcp/, FastAPI will route requests to it. Mounting (instead of a
+# custom dispatcher) avoids the scope-passthrough bugs that bit us earlier.
+mcp_app = mcp.streamable_http_app()
 
-async def health_app(scope, receive, send):
-    """Minimal ASGI app for the /health endpoint. No auth required."""
-    if scope["type"] != "http":
-        return
-    if scope["path"] != "/health":
-        await send({"type": "http.response.start", "status": 404, "headers": []})
-        await send({"type": "http.response.body", "body": b""})
-        return
-    body = json.dumps({
+
+def _expected_token() -> str:
+    """The expected bearer token. Falls back to SMS_AGENT_API_KEY for compat."""
+    return os.environ.get("MCP_AUTH_TOKEN") or os.environ.get("SMS_AGENT_API_KEY") or ""
+
+
+app = FastAPI(title="BK Jr. MCP (with auth)", version="1.9.0")
+
+
+@app.middleware("http")
+async def bearer_auth_middleware(request: Request, call_next):
+    """
+    Enforce bearer auth on every request EXCEPT /health.
+    MCP_TRANSPORT=stdio mode is unaffected (this is HTTP-only).
+    """
+    # Health check is always open (Render health checks need no credentials)
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    expected = _expected_token()
+    auth_header = request.headers.get("authorization", "")
+    if not expected:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "unauthorized", "message": "server has no auth token configured; set MCP_AUTH_TOKEN"},
+            headers={"www-authenticate": 'Bearer realm="bk-jr-recruiter"'},
+        )
+    if not auth_header.lower().startswith("bearer "):
+        return JSONResponse(
+            status_code=401,
+            content={"error": "unauthorized", "message": "missing Authorization: Bearer <token> header"},
+            headers={"www-authenticate": 'Bearer realm="bk-jr-recruiter"'},
+        )
+    token = auth_header[7:].strip()
+    if token != expected:
+        return JSONResponse(
+            status_code=401,
+            content={"error": "unauthorized", "message": "invalid bearer token"},
+            headers={"www-authenticate": 'Bearer realm="bk-jr-recruiter"'},
+        )
+
+    return await call_next(request)
+
+
+@app.get("/health")
+def health():
+    return {
         "status": "ok",
         "server": "bk-jr-recruiting",
         "version": "1.9.0",
         "tools": 24,
         "auth": "bearer-required",
-    }).encode()
-    await send({
-        "type": "http.response.start",
-        "status": 200,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(body)).encode()),
-        ],
-    })
-    await send({"type": "http.response.body", "body": body})
+    }
 
 
-def _extract_bearer(headers):
-    """Pull the bearer token from the Authorization header. Returns None if missing/malformed."""
-    for name, value in headers:
-        if name == b"authorization":
-            try:
-                v = value.decode("latin-1") if isinstance(value, bytes) else value
-            except Exception:
-                return None
-            if v.lower().startswith("bearer "):
-                return v[7:].strip()
-    return None
-
-
-def _expected_token():
-    """The expected bearer token. Falls back to SMS_AGENT_API_KEY for compat."""
-    return os.environ.get("MCP_AUTH_TOKEN") or os.environ.get("SMS_AGENT_API_KEY") or ""
-
-
-async def _send_401(send, msg):
-    body = json.dumps({"error": "unauthorized", "message": msg}).encode()
-    await send({
-        "type": "http.response.start",
-        "status": 401,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"www-authenticate", b'Bearer realm="bk-jr-recruiter"'),
-            (b"content-length", str(len(body)).encode()),
-        ],
-    })
-    await send({"type": "http.response.body", "body": body})
-
-
-async def _send_404(send):
-    body = b""
-    await send({
-        "type": "http.response.start",
-        "status": 404,
-        "headers": [(b"content-length", b"0")],
-    })
-    await send({"type": "http.response.body", "body": body})
-
-
-async def dispatcher(scope, receive, send):
-    """Pure ASGI dispatcher with bearer auth.
-
-    Routes:
-      - /health            -> no auth, returns OK
-      - /mcp, /mcp/        -> requires bearer auth, then MCP server
-      - /mcp/xxx           -> requires bearer auth, then MCP server
-      - everything else    -> 404
-    """
-    # Handle lifespan events so uvicorn doesn't hang on startup
-    if scope["type"] == "lifespan":
-        while True:
-            message = await receive()
-            if message["type"] == "lifespan.startup":
-                await send({"type": "lifespan.startup.complete"})
-            elif message["type"] == "lifespan.shutdown":
-                await send({"type": "lifespan.shutdown.complete"})
-                return
-        return
-
-    if scope["type"] != "http":
-        return
-
-    path = scope["path"]
-
-    # Health check (no auth — Render needs to reach it without credentials)
-    if path == "/health":
-        await health_app(scope, receive, send)
-        return
-
-    # MCP server paths
-    if path == "/mcp" or path.startswith("/mcp/"):
-        # === AUTH CHECK ===
-        token = _extract_bearer(scope.get("headers") or [])
-        expected = _expected_token()
-        if not expected:
-            await _send_401(send, "server has no auth token configured; set MCP_AUTH_TOKEN")
-            return
-        if not token or token != expected:
-            await _send_401(send, "invalid or missing bearer token")
-            return
-
-        # Auth passed — route to the MCP server. Use /mcp as the canonical path
-        # (strip trailing slash from /mcp/ so the MCP app's internal routing
-        # at /mcp catches it without a 307).
-        if path == "/mcp/":
-            new_path = "/mcp"
-        else:
-            new_path = path
-        new_scope = dict(scope)
-        new_scope["path"] = new_path
-        new_scope["raw_path"] = new_path.encode()
-        await mcp.streamable_http_app()(new_scope, receive, send)
-        return
-
-    # 404
-    await _send_404(send)
+# Mount the FastMCP app at both /mcp and /mcp/ so trailing-slash works
+# without a 307 redirect. FastAPI handles both via two mounts.
+app.mount("/mcp", mcp_app)
+app.mount("/mcp/", mcp_app)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BK Jr. MCP server (pure ASGI, with bearer auth)")
+    parser = argparse.ArgumentParser(description="BK Jr. MCP server (FastAPI + bearer auth)")
     parser.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
     args = parser.parse_args()
@@ -174,7 +114,7 @@ def main() -> None:
         print("         Set MCP_AUTH_TOKEN env var before starting.")
 
     uvicorn.run(
-        dispatcher,
+        app,
         host=args.host,
         port=args.port,
         log_level="info",
