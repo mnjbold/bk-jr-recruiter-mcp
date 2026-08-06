@@ -1,0 +1,26 @@
+# Render Blueprint for BK Jr. MCP server.
+# This file is read by Render when you create a new "Blueprint" service.
+# Or use the API with this as the build config.
+
+services:
+  - type: web
+    name: bk-jr-recruiter-mcp
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: BACKEND_URL
+        value: https://bk-jr-api.aixlabs.fun
+      - key: MCP_TRANSPORT
+        value: http
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # MCP_AUTH_TOKEN is set as a secret via Render's secret management
+      # (the API call sets it; the env var here is just a placeholder)
+      - key: MCP_AUTH_TOKEN
+        sync: false
