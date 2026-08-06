@@ -28,6 +28,7 @@ import os
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from starlette.routing import Mount
 
 # IMPORTANT: set stateless_http BEFORE importing the streamable app
 # (some FastMCP internals read this at import-time).
@@ -97,10 +98,16 @@ def health():
     }
 
 
-# Mount the FastMCP app at both /mcp and /mcp/ so trailing-slash works
-# without a 307 redirect. FastAPI handles both via two mounts.
-app.mount("/mcp", mcp_app)
-app.mount("/mcp/", mcp_app)
+# Mount the FastMCP app at /mcp with redirect_slashes=False so POST /mcp
+# does NOT 307-redirect to /mcp/ (which would strip the Authorization header
+# in some clients). With redirect_slashes=False, both /mcp and /mcp/ work
+# without a redirect.
+app.router.routes.append(
+    Mount("/mcp", app=mcp_app, name="mcp-no-slash")
+)
+app.router.routes.append(
+    Mount("/mcp/", app=mcp_app, name="mcp-with-slash")
+)
 
 
 def main() -> None:
