@@ -52,6 +52,20 @@ _shm.StreamableHTTPSessionManager.handle_request = _patched_handle_request
 
 
 # Force session_manager creation (lazy via streamable_http_app).
+# Behind a reverse proxy (Cloudflare Tunnel -> Traefik) the public Host header is
+# not localhost, which trips the MCP SDK's DNS-rebinding protection and returns
+# 421 "Invalid Host header". Configure it from MCP_ALLOWED_HOSTS:
+#   "*"                  -> disable the check (proxy already terminates/validates)
+#   "a.example,b.example" -> allow exactly these hosts
+from mcp.server.transport_security import TransportSecuritySettings as _TSS
+
+_allowed = [h.strip() for h in os.environ.get("MCP_ALLOWED_HOSTS", "*").split(",") if h.strip()]
+mcp.settings.transport_security = _TSS(
+    enable_dns_rebinding_protection=("*" not in _allowed),
+    allowed_hosts=_allowed,
+    allowed_origins=_allowed,
+)
+
 _mcp_app = mcp.streamable_http_app()
 mcp_session_manager = mcp._session_manager
 
