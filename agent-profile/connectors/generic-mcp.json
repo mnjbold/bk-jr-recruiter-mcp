@@ -1,0 +1,9 @@
+{
+  "_comment": "Client-agnostic descriptor for clients with NATIVE remote MCP support (Claude Code, Cursor, Continue, a dashboard backend). Claude Desktop is NOT one of these - see claude-desktop.json. Substitute SMS_AGENT_API_KEY from your secret store; never commit the real value.",
+  "name": "bk-jr",
+  "transport": "streamable-http",
+  "url": "https://bkjr-mcp.getbijou.xyz/mcp",
+  "headers": { "Authorization": "Bearer ${SMS_AGENT_API_KEY}" },
+  "health": "https://bkjr-mcp.getbijou.xyz/health",
+  "backend": "https://bkjr-api.getbijou.xyz"
+}

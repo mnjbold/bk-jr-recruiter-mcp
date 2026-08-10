@@ -1,0 +1,28 @@
+{
+  "_comment": "Lifecycle hooks. Client-agnostic declarations - map these onto your runner hook system (Claude Code hooks, a dashboard job queue, etc).",
+  "hooks": {
+    "before_tool": [
+      {
+        "match": ["send_sms","bulk_outreach","bulk_outreach_for_job","trigger_screening_call","retell_place_call","gmail_send"],
+        "action": "require_confirmation",
+        "reason": "Irreversible: reaches a real person (rule R1)."
+      },
+      {
+        "match": ["send_sms","bulk_outreach","bulk_outreach_for_job"],
+        "action": "assert_not_paused",
+        "reason": "Opt-out enforcement (rule R5)."
+      }
+    ],
+    "after_tool": [
+      {
+        "match": ["send_sms","bulk_outreach","bulk_outreach_for_job","trigger_screening_call","retell_place_call"],
+        "action": "update_candidate",
+        "reason": "Every outcome is logged (rule R6)."
+      }
+    ],
+    "on_error": [
+      { "match_status": [401,403], "action": "halt_and_notify_bk", "reason": "Credential failure - stop the batch (rule R8)." },
+      { "match_consecutive_failures": 3, "action": "halt_and_notify_bk", "reason": "Likely systemic failure." }
+    ]
+  }
+}
