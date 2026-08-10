@@ -1,0 +1,18 @@
+{
+  "_comment": "Claude Desktop only accepts STDIO servers, so a remote MCP URL must go through the mcp-remote bridge. A bare url/headers entry is rejected as invalid and skipped. Use an absolute path to npx.cmd on Windows - Claude Desktop does not reliably inherit PATH. Keep the space inside AUTH_HEADER: mcp-remote splits --header arguments on spaces.",
+  "mcpServers": {
+    "bk-jr": {
+      "command": "C:\\Program Files\\nodejs\\npx.cmd",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://bkjr-mcp.getbijou.xyz/mcp",
+        "--header",
+        "Authorization:${AUTH_HEADER}"
+      ],
+      "env": {
+        "AUTH_HEADER": "Bearer ${SMS_AGENT_API_KEY}"
+      }
+    }
+  }
+}
