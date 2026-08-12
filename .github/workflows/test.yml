@@ -1,0 +1,49 @@
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('retell-quo-server/requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        working-directory: retell-quo-server
+        run: |
+          python -m pip install --upgrade pip
+          # Match Dockerfile pins (mcp<2, starlette<0.38) plus dev tools.
+          pip install -r requirements.txt
+          pip install "mcp>=1.9.0,<2.0.0" "starlette<0.38" pytest pytest-asyncio ruff
+
+      - name: Run ruff
+        working-directory: retell-quo-server
+        run: ruff check src tests
+
+      - name: Run pytest
+        working-directory: retell-quo-server
+        env:
+          # Dummy keys so the modules that instantiate clients at import time
+          # don't blow up. The tests use mocks — no real network calls.
+          QUO_API_KEY: test_dummy
+          RETELL_API_KEY: test_dummy
+          SMS_AGENT_API_KEY: test_dummy
+          BACKEND_URL: http://localhost:8080
+        run: pytest tests/ -v

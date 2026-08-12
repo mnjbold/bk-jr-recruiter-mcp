@@ -1,0 +1,55 @@
+name: deploy-staging
+
+on:
+  push:
+    branches: [bkjr-mcp/staging]
+  workflow_dispatch:
+
+jobs:
+  notify-coolify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Coolify auto-deploys when it sees a new commit on the watched branch.
+    # This workflow exists so:
+    #   1. The staging branch is the only "deployable" path (no accidental
+    #      staging deploys from feature branches).
+    #   2. We get a Slack / Discord notification on deploy.
+    #   3. We run a smoke test against staging after deploy.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Notify deploy (optional Slack/Discord webhook)
+        if: env.DEPLOY_WEBHOOK != ''
+        run: |
+          curl -s -X POST "$DEPLOY_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d "{\"text\":\"🚀 BK JR MCP staging deploy: ${{ github.sha }} by ${{ github.actor }}\"}"
+        env:
+          DEPLOY_WEBHOOK: ${{ secrets.DEPLOY_WEBHOOK }}
+
+      - name: Wait for Coolify to finish deploy
+        run: sleep 60
+
+      - name: Smoke test staging MCP
+        env:
+          STAGING_URL: ${{ secrets.STAGING_MCP_URL }}
+          STAGING_TOKEN: ${{ secrets.STAGING_MCP_TOKEN }}
+        run: |
+          if [ -z "$STAGING_URL" ]; then
+            echo "::warning::STAGING_MCP_URL not set — skipping smoke test"
+            exit 0
+          fi
+          # 1. Health endpoint (no auth required)
+          curl -fsS "$STAGING_URL/health" | tee /tmp/health.json
+          python -c "import json; d=json.load(open('/tmp/health.json')); assert d['status']=='ok', d; print('health OK')"
+
+          # 2. Tool registration (with bearer auth)
+          curl -fsS "$STAGING_URL/mcp" \
+            -H "Authorization: Bearer $STAGING_TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json, text/event-stream" \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+            -o /tmp/tools.json
+          # MCP streamable-http returns SSE — just check we got 200 + non-empty
+          test -s /tmp/tools.json
+          echo "tools/list smoke OK"
