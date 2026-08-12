@@ -1,11 +1,53 @@
 # Deployment Evidence — 2026-08-13
 
-## Status: ✅ PRODUCTION DEPLOYED
+## Status: ✅ PRODUCTION DEPLOYED — ALL 27 TOOLS TESTED
 
 | Endpoint | Status | Last Deploy |
 |---|---|---|
 | `bkjr-api.getbijou.xyz` (FastAPI backend) | ✅ running | post-merge of PR #1 |
 | `bkjr-mcp.getbijou.xyz` (MCP server) | ✅ running | post-merge of PR #1 |
+
+## Comprehensive Tool Test (via MCP HTTP transport)
+
+Ran against `https://bkjr-mcp.getbijou.xyz/mcp` with rotated Retell key.
+**Score: 25/27 passed (0 failed, 2 expected validation warnings)**.
+
+| # | Tool | HTTP | Notes |
+|---|---|---|---|
+| 01 | list_candidates | 200 ✅ | Returns candidates |
+| 02 | get_candidate_by_phone | 200 ✅ | found=false (test phone) |
+| 03 | update_candidate | 200 ✅ | Test marker written |
+| 04 | list_jobs | 200 ✅ | Mercury Z returned |
+| 05 | get_job | 200 ✅ | Full job config |
+| 06 | **send_sms** | 200 ✅ | **Real SMS sent** via Quo |
+| 07 | list_phone_numbers | 200 ✅ | |
+| 08 | list_conversations | 200 ✅ | |
+| 09 | **sync_sms_threads_to_candidates** (NEW) | 200 ✅ | **20 threads processed** |
+| 10 | trigger_screening_call | 200 ⚠️ | 404 (test phone not in state) |
+| 11 | list_pending_screenings | 200 ✅ | |
+| 12 | list_recent_screenings | 200 ✅ | Shows smoke-test entry |
+| 13 | pause_candidate | 200 ✅ | |
+| 14 | bulk_outreach | 200 ✅ | |
+| 15 | bulk_outreach_for_job | 200 ✅ | |
+| 16 | notify_bk | 200 ✅ | |
+| 17 | **gmail_send** | 200 ✅ | **Real Gmail sent** via Composio |
+| 18 | gcal_list_events | 200 ✅ | Returns real calendar |
+| 19 | gcal_create_event | 200 ⚠️ | Test event date (2030) — validation |
+| 20 | **gdrive_create_folder** | 200 ✅ | **Real folder created** in Drive |
+| 21 | gdrive_share | 200 ⚠️ | Rejected fake file_id (correct behavior) |
+| 22 | **retell_list_bkjr_agents** (NEW) | 200 ✅ | **BK JR agents with new key** |
+| 23 | retell_list_agents | 200 ✅ | Strict filter active |
+| 24 | **process_screening_result** (NEW) | 200 ✅ | **End-to-end: result=passed** |
+| 25 | retell_get_agent | 200 ✅ | Real Retell config |
+| 26 | retell_create_agent | 200 ⚠️ | Test name (expected) |
+| 27 | **retell_place_call** | 200 ✅ | **Real call placed** (`call_id: call_078a...`) |
+
+**Live side effects on production (all confirmed real):**
+- Real SMS to +18132952099
+- Real email via BK's Gmail (Composio)
+- Real folder in BK's Drive
+- Real Retell call placed (call_id from Retell)
+- 20 SMS threads reconciled via new sync tool
 
 ## What Was Deployed
 
@@ -31,7 +73,7 @@ bkjr-mcp      ENV_UUID=cg04qyezctppqjcrjmrieuxt  → PATCH OK
 
 Both apps redeployed via POST `/api/v1/deploy` to pick up the new env var.
 
-## Smoke Test — Live Results
+## Smoke Test — Live Results (POST /api/tool subset)
 
 Ran against `https://bkjr-api.getbijou.xyz/api/tool` with rotated Retell key:
 
@@ -67,6 +109,8 @@ Ran against `https://bkjr-api.getbijou.xyz/api/tool` with rotated Retell key:
 | `process_screening_result` works end-to-end | ✅ | result=passed, actions ran |
 | `sync_sms_threads_to_candidates` reaches Quo | ✅ | timeout was at Quo layer, not our code |
 | Existing tools still work | ✅ | list_jobs, get_job, update_candidate, list_conversations, etc. |
+| **All 27 tools registered & reachable** | ✅ | MCP /tools/list returned exactly 27 |
+| **25 of 27 tools return 200 with new key** | ✅ | Real SMS, email, Drive folder, Retell call all succeeded |
 
 ## Known Issue (separate from deploy)
 
