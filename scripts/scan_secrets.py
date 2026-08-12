@@ -54,7 +54,7 @@ def main(files: list[str]) -> int:
         try:
             with open(fname, "r", encoding="utf-8", errors="ignore") as fh:
                 content = fh.read()
-        except (OSError, IOError):
+        except OSError:
             continue
         for pat, label in PATTERNS:
             for m in re.finditer(pat, content):
