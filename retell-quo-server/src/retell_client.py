@@ -219,6 +219,77 @@ class RetellClient:
         resp.raise_for_status()
         return resp.json()
 
+    def list_calls(self, filters: dict | None = None, limit: int = 20) -> list[dict]:
+        """List recent Retell calls. `filters` follows Retell's filter_criteria
+        shape (e.g. {"agent": [{"agent_id": "agent_..."}], "call_status": ["ended"]})."""
+        resp = httpx.post(
+            f"{RETELL_API_BASE}/v2/list-calls",
+            headers=self.headers,
+            json={"filter_criteria": filters or {}, "limit": limit},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # v2 list endpoints wrap in {"items": [...], "has_more": bool}
+        if isinstance(data, list):
+            return data
+        return data.get("items") or data.get("calls") or data.get("data") or []
+
+    def get_llm(self, llm_id: str) -> dict:
+        """Fetch a Retell LLM (response engine) — prompt + tools + states."""
+        resp = httpx.get(f"{RETELL_API_BASE}/get-retell-llm/{llm_id}",
+                         headers=self.headers, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def update_llm(self, llm_id: str, patch: dict) -> dict:
+        """Patch a Retell LLM. `patch` is the raw Retell field set
+        (e.g. {"general_prompt": "new prompt", "model": "gpt-4o"})."""
+        resp = httpx.patch(f"{RETELL_API_BASE}/update-retell-llm/{llm_id}",
+                           headers=self.headers, json=patch, timeout=20)
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_phone_numbers(self) -> list[dict]:
+        """List Retell phone numbers with their inbound/outbound agent bindings."""
+        resp = httpx.get(f"{RETELL_API_BASE}/list-phone-numbers",
+                         headers=self.headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list):
+            return data
+        return data.get("items") or data.get("phone_numbers") or data.get("data") or []
+
+    def update_phone_number(self, number: str, patch: dict) -> dict:
+        """Rebind a Retell number. `patch` uses Retell's shape
+        (e.g. {"inbound_agents": [{"agent_id": "agent_...", "agent_version": "latest_published"}]}).
+        All agent_id values are allowlist-checked."""
+        # Defensive: any agent_id in the patch must be BK-JR-owned
+        for key in ("inbound_agents", "outbound_agents"):
+            for binding in patch.get(key) or []:
+                aid = binding.get("agent_id")
+                if aid:
+                    assert_agent_allowed(aid)
+        resp = httpx.patch(f"{RETELL_API_BASE}/update-phone-number/{number}",
+                           headers=self.headers, json=patch, timeout=20)
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_concurrency(self) -> dict:
+        """Current concurrent-call usage and the org limit."""
+        resp = httpx.get(f"{RETELL_API_BASE}/get-concurrency",
+                         headers=self.headers, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def update_live_call(self, call_id: str, body: dict) -> dict:
+        """Update a call that's in progress — override dynamic_variables or
+        metadata mid-conversation."""
+        resp = httpx.patch(f"{RETELL_API_BASE}/v2/update-call/{call_id}",
+                           headers=self.headers, json=body, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
     # ── Agent lifecycle (Ed's "spin up any agent on demand" ask) ────────────
 
     def list_agents(
