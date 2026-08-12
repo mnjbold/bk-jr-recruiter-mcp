@@ -101,11 +101,10 @@ def _is_bkjr_name(name: str | None) -> bool:
 
 def _is_bkjr_agent(agent_id: str | None, name: str | None = None) -> bool:
     """True if the agent is BK JR-owned, by id OR name prefix."""
-    if agent_id and agent_id in BKJR_AGENT_IDS:
-        return True
-    if name and _is_bkjr_name(name):
-        return True
-    return False
+    return bool(
+        (agent_id and agent_id in BKJR_AGENT_IDS)
+        or (name and _is_bkjr_name(name))
+    )
 
 
 def assert_agent_allowed(

@@ -12,16 +12,16 @@ Integration points:
 from __future__ import annotations
 
 import os
-import json
-import httpx
-import structlog
 from datetime import datetime
 
+import httpx
+import structlog
+
+from flows.jobs import list_jobs, load_job
+from flows.recruitment_flows import FlowState, render_job_template, render_template
+from src.notify import notify_bk as notify_channels
 from src.quo_client import QuoClient
 from src.retell_client import RetellClient
-from src.notify import notify_bk as notify_channels
-from flows.recruitment_flows import FlowState, render_template, render_job_template
-from flows.jobs import load_job, list_jobs
 
 log = structlog.get_logger(__name__)
 
