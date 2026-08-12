@@ -11,6 +11,16 @@ venv/
 .env
 .env.local
 .env.production
+# Deployment manifests with embedded secrets — use Coolify env vars
+render.yaml
+fly.toml
+# Tests
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+# Local venv from enhancement work
+retell-quo-server/.venv/
 
 # OS
 .DS_Store

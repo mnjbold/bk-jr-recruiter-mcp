@@ -6,9 +6,9 @@ API docs: https://quo.com/docs/mdx/api-reference/introduction
 from __future__ import annotations
 
 import os
+
 import httpx
 import structlog
-from typing import Optional
 
 log = structlog.get_logger(__name__)
 

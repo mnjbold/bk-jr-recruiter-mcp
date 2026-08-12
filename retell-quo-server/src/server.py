@@ -18,21 +18,18 @@ Exposes:
 # inspects the `lifespan` parameter at runtime, and stringified annotations
 # break it. (The MCP server in mcp_server.py has the same caveat.)
 
-import os
-import hmac
-import hashlib
 import json
-from contextlib import asynccontextmanager
+import os
 
 import structlog
-from fastapi import FastAPI, Request, HTTPException, Header
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
-from typing import Optional, List
+
+from flows.jobs import list_jobs, load_job
 
 from .agent import SMSRecruitmentAgent
 from .retell_client import RetellClient
-from flows.jobs import list_jobs, load_job
 
 log = structlog.get_logger(__name__)
 
@@ -63,7 +60,8 @@ app = FastAPI(title="Quo SMS Recruitment Agent", version="1.0.0")
 # CORS so BK's browser board (board.html) can poll /api/candidates cross-origin.
 # ponytail: allow_origins=["*"] is fine for a bearer-token-protected read API;
 # tighten to the board's actual origin if it's ever served somewhere fixed.
-from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -214,20 +212,20 @@ class SendSMSRequest(BaseModel):
     hallucinated. The first non-empty one wins. Same defensive pattern as
     /api/trigger-call.
     """
-    to: Optional[str] = None
-    phone: Optional[str] = None
-    phone_number: Optional[str] = None
-    candidate_phone: Optional[str] = None
-    to_number: Optional[str] = None
-    recipient: Optional[str] = None
-    number: Optional[str] = None
-    mobile: Optional[str] = None
-    phoneNumber: Optional[str] = None
-    toPhone: Optional[str] = None
+    to: str | None = None
+    phone: str | None = None
+    phone_number: str | None = None
+    candidate_phone: str | None = None
+    to_number: str | None = None
+    recipient: str | None = None
+    number: str | None = None
+    mobile: str | None = None
+    phoneNumber: str | None = None
+    toPhone: str | None = None
     message: str
-    from_number_id: Optional[str] = None
-    candidate_name: Optional[str] = None
-    track_state: Optional[bool] = True
+    from_number_id: str | None = None
+    candidate_name: str | None = None
+    track_state: bool | None = True
 
     def resolved_to(self) -> str:
         for v in (self.to, self.phone, self.phone_number, self.candidate_phone,
@@ -275,7 +273,7 @@ async def send_sms(req: SendSMSRequest, authorization: str = Header(None)):
 class RelayRequest(BaseModel):
     to: str           # Candidate phone number
     message: str      # What BK typed in Telegram
-    from_number_id: Optional[str] = None
+    from_number_id: str | None = None
 
 
 @app.post("/api/relay")
@@ -296,7 +294,7 @@ class Candidate(BaseModel):
     location: str = ""
 
 class BulkRequest(BaseModel):
-    candidates: List[Candidate]
+    candidates: list[Candidate]
     template: str = "mercury_initial"
     extra_vars: dict = {}
 
@@ -314,15 +312,15 @@ async def bulk_outreach(req: BulkRequest, authorization: str = Header(None)):
 class JobCandidate(BaseModel):
     name: str
     phone: str
-    location: Optional[str] = None
+    location: str | None = None
 
 
 class BulkJobRequest(BaseModel):
     job_id: str
-    candidates: List[JobCandidate]
+    candidates: list[JobCandidate]
     skip_if_contacted: bool = True
     dry_run: bool = False
-    max_per_run: Optional[int] = None
+    max_per_run: int | None = None
 
 
 @app.post("/api/bulk_job")
@@ -513,6 +511,21 @@ async def hermes_tool(req: ToolRequest, authorization: str = Header(None)):
         convos = agent.quo.list_conversations(number_id)
         return {"conversations": convos}
 
+    elif tool == "sync_sms_threads_to_candidates":
+        """
+        SMS thread → candidate sync. See sms_sync.py for details.
+
+        Returns {ok, window_days, total_threads, in_window, created_count,
+        updated_count, skipped_count, created, updated, skipped_sample}.
+        """
+        from src.sms_sync import sync_sms_threads
+        return sync_sms_threads(
+            agent,
+            window_days=params.get("window_days", 7),
+            phone_number_id=params.get("phone_number_id", ""),
+            primary_number=os.environ.get("QUO_BK_NUMBER", ""),
+        )
+
     elif tool == "create_contact":
         contact = agent.quo.create_contact(params["name"], params["phone"], params.get("tags", []))
         return {"ok": True, "contact": contact}
@@ -646,10 +659,26 @@ async def hermes_tool(req: ToolRequest, authorization: str = Header(None)):
     # app.composio.dev.
     elif tool in ("gmail_send", "gcal_list_events", "gcal_create_event",
                   "gdrive_create_folder", "gdrive_share", "retell_list_agents",
-                  "retell_create_agent", "retell_get_agent", "retell_place_call"):
-        from .retell_client import RetellClient
+                  "retell_list_bkjr_agents", "retell_create_agent",
+                  "retell_get_agent", "retell_place_call", "process_screening_result"):
         from .composio_google import ComposioGoogleClient
+        from .retell_client import RetellClient
         g = ComposioGoogleClient()
+
+        if tool == "process_screening_result":
+            # Post-screening automation. Branches on screening_result:
+            #   - "passed":           update state -> screening_passed, send
+            #                         SMS, notify BK, create GCal event stub,
+            #                         create Drive folder, send Gmail packet.
+            #   - "needs_follow_up":  update state -> screening_needs_follow_up,
+            #                         personalized SMS, pause 48h, notify BK.
+            #   - "failed":           update state -> screening_failed,
+            #                         pause permanently.
+            # Idempotent: same call_id -> same response, no duplicate side
+            # effects. Caller may bypass the call lookup by passing
+            # screening_result + custom_analysis_fields directly.
+            from .screening_automation import process_screening_result as _psr
+            return _psr(agent, params, g)
 
         if tool == "gmail_send":
             to = params.get("to")
@@ -691,9 +720,22 @@ async def hermes_tool(req: ToolRequest, authorization: str = Header(None)):
                 raise HTTPException(status_code=400, detail="'file_id' and 'email' are required.")
             return g.gdrive_share(file_id=file_id, email=email, role=role)
 
+        elif tool == "retell_list_bkjr_agents":
+            retell = RetellClient()
+            agents = retell.list_agents(include_other_clients=False)
+            return {"agents": agents, "count": len(agents), "filter": "bkjr_only"}
+
         elif tool == "retell_list_agents":
             retell = RetellClient()
-            return {"agents": retell.list_agents()}
+            include_other_clients = bool(params.get("include_other_clients", False))
+            agents = retell.list_agents(include_other_clients=include_other_clients)
+            payload = {"agents": agents, "count": len(agents)}
+            if include_other_clients:
+                payload["filter"] = "all_with_warn"
+                payload["other_clients_count"] = sum(1 for a in agents if not a.get("is_bkjr"))
+            else:
+                payload["filter"] = "bkjr_only"
+            return payload
 
         elif tool == "retell_get_agent":
             agent_id = params.get("agent_id")

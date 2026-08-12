@@ -71,7 +71,7 @@ def _call(tool: str, params: dict) -> dict:
     if resp.status_code >= 400:
         try:
             detail = resp.json()
-        except Exception:
+        except ValueError:
             detail = resp.text
         raise RuntimeError(f"backend {resp.status_code}: {detail}")
     return resp.json()
@@ -163,6 +163,39 @@ def list_conversations(phone_number_id: str = "") -> dict:
     if phone_number_id:
         params["phone_number_id"] = phone_number_id
     return _call("list_conversations", params)
+
+
+@mcp.tool()
+def sync_sms_threads_to_candidates(
+    window_days: int = 7,
+    phone_number_id: str = "",
+) -> dict:
+    """
+    Pull recent SMS conversations from Quo and reconcile with the
+    candidate sheet.
+
+    For each thread whose phone number is NOT already tracked, we add a
+    new candidate row with `state: "sms_engaged"` and `source: "sms_sync"`.
+    For threads whose phone IS already tracked, we bump `last_sms_activity`
+    and update state if it was stale.
+
+    The BK JR MCP exposes only conversation METADATA — not message bodies.
+    So this sync cannot classify "YES" replies; that requires a separate
+    integration with Quo's message-list endpoint (see KNOWN_GAPS).
+
+    Args:
+        window_days: only consider conversations active within N days
+            (default 7). Stale threads are skipped.
+        phone_number_id: optional Quo number ID; defaults to BK's primary.
+
+    Returns:
+        {ok, window_days, total_threads, in_window, created_count,
+         updated_count, skipped_count, created, updated, skipped_sample}
+    """
+    return _call("sync_sms_threads_to_candidates", {
+        "window_days": window_days,
+        "phone_number_id": phone_number_id,
+    })
 
 
 # ── Voice / screening tools ──────────────────────────────────────────────────
@@ -313,7 +346,7 @@ def gcal_create_event(
     summary: str,
     start: str,
     end: str,
-    attendees: list = None,
+    attendees: list | None = None,
     description: str = "",
 ) -> dict:
     """
@@ -353,13 +386,102 @@ def gdrive_share(file_id: str, email: str, role: str = "reader") -> dict:
 # ── Retell agent lifecycle (Ed's "spin up any agent on demand" ask) ──────────
 
 @mcp.tool()
-def retell_list_agents() -> dict:
+def retell_list_bkjr_agents() -> dict:
     """
-    List all Retell voice agents on BK's workspace. Use to see what
-    specialists are available (screener, follow-up, scheduler, etc.)
-    before dispatching a call.
+    List BK JR-owned Retell voice agents ONLY.
+
+    This is the safe, default way to see what agents are available
+    (screener, follow-up, scheduler, etc.) before dispatching a call.
+    Other clients' production agents are filtered out — they are not
+    visible to BK JR's MCP. Use this for normal agent discovery.
+
+    Returns:
+        {"agents": [...], "count": N, "filter": "bkjr_only"}
     """
-    return _call("retell_list_agents", {})
+    return _call("retell_list_bkjr_agents", {})
+
+
+@mcp.tool()
+def retell_list_agents(
+    include_other_clients: bool = False,
+) -> dict:
+    """
+    List Retell voice agents on BK's workspace.
+
+    STRICT FILTER (default): only returns agents that are BK JR-owned
+    (in BKJR_AGENT_IDS OR whose name starts with "BK JR" / "Outbound
+    Screening Agent"). Other clients' production agents (Pearl Health,
+    NNC, Bold Connect IT Support, etc.) are filtered out.
+
+    Args:
+        include_other_clients: True to return ALL agents on the workspace,
+            including ones belonging to other clients. Use ONLY for
+            diagnostic / audit purposes — every call logs a WARN. False
+            (default) is the safe choice for normal agent discovery.
+
+    Prefer `retell_list_bkjr_agents` for the common case — it's the same
+    default but with a name that makes the intent obvious at call sites.
+    """
+    return _call("retell_list_agents", {"include_other_clients": include_other_clients})
+
+
+@mcp.tool()
+def process_screening_result(
+    call_id: str = "",
+    phone: str = "",
+    candidate_name: str = "",
+    screening_result: str = "",
+    custom_analysis_fields: dict | None = None,
+) -> dict:
+    """
+    Post-screening automation: branch on a Retell call's screening outcome.
+
+    The webhook at /webhook/retell calls this automatically when
+    `call_analyzed` fires; this MCP wrapper lets external clients
+    (Hermes, OpenClaw, Claude Desktop) trigger the same workflow
+    manually — useful for re-processing, debugging, or piping a result
+    that came from somewhere other than Retell.
+
+    Branches:
+      - "passed":          update state → screening_passed, send SMS,
+                           notify BK, create GCal event stub, create
+                           Drive folder, send Gmail packet.
+      - "needs_follow_up": update state → screening_needs_follow_up,
+                           send a personalized SMS based on which
+                           requirement failed, pause the candidate 48h,
+                           notify BK.
+      - "failed":          update state → screening_failed, pause
+                           permanently.
+
+    Args:
+        call_id:  Retell call ID. If set, fetches the call to extract
+                  `metadata.candidate_phone` and
+                  `call_analysis.custom_analysis_fields`. Optional if
+                  `phone` + `screening_result` are provided directly.
+        phone:    E.164 candidate phone (col H from the sheet).
+        candidate_name: Required if `phone` is for a candidate not in
+                  the in-memory state.
+        screening_result: One of "passed" / "needs_follow_up" / "failed".
+                          Required if `call_id` is not given.
+        custom_analysis_fields: Pass-through overrides for the
+                  has_iphone_11_plus / has_vehicle_with_ladder_rack /
+                  can_commit_schedule / preferred_location fields.
+                  Optional — used when `call_id` isn't available.
+
+    Idempotent: same call_id → same response, no duplicate SMS / events.
+    """
+    params: dict = {}
+    if call_id:
+        params["call_id"] = call_id
+    if phone:
+        params["phone"] = phone
+    if candidate_name:
+        params["candidate_name"] = candidate_name
+    if screening_result:
+        params["screening_result"] = screening_result
+    if custom_analysis_fields:
+        params["custom_analysis_fields"] = custom_analysis_fields
+    return _call("process_screening_result", params)
 
 
 @mcp.tool()
@@ -404,7 +526,7 @@ def retell_place_call(
     to_number: str,
     agent_id: str = "",
     from_number: str = "",
-    dynamic_variables: dict = None,
+    dynamic_variables: dict | None = None,
 ) -> dict:
     """
     Place an outbound call to ANY Retell agent (not just the default
