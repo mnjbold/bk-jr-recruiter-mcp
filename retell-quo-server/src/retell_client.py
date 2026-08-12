@@ -28,6 +28,111 @@ log = structlog.get_logger(__name__)
 
 RETELL_API_BASE = "https://api.retellai.com"
 
+# ── Agent allowlist + denylist ──────────────────────────────────────────────
+# This Retell workspace is SHARED across clients (Bold Connect / Pearl / NNC /
+# Mercury Z / IT Support / BK JR / National Neuropathy etc.). Mutating any
+# non-BK-JR agent would take down a live production system belonging to another
+# client. Hardcoded on purpose — env vars can be misconfigured; missing config
+# must not silently mean "no protection".
+#
+# BK JR agents: identified by EITHER agent_id OR name prefix. The name-prefix
+# filter catches future BK JR agents added via the dashboard before their IDs
+# land in this allowlist — defense in depth.
+BKJR_AGENT_IDS: frozenset[str] = frozenset({
+    "agent_c530f8a10e8a502798c49a30c6",   # BK JR Call Assistant (screener)
+    "agent_6e853673d0d33f480c2164415e",   # BK JR Connect-Now (live connect)
+    "agent_c0d49f55c814a63197ce06b3d8",   # BK JR Outreach (Interest-Only)
+})
+
+# BK JR agents are also grouped in Retell under the "BK JR" folder. The MCP
+# checks name prefix on every agent we touch — case-insensitive — so a new
+# BK JR agent appears automatically without a code deploy.
+BKJR_NAME_PREFIXES: tuple[str, ...] = (
+    "bk jr",
+    "outbound screening agent",
+)
+
+# Other clients' production agents — REFUSE to read or mutate any of these.
+# Even reads are blocked: the project rule is "never touch these agents", and
+# a read is the first step of an edit-by-hand mistake.
+PROTECTED_AGENT_IDS: frozenset[str] = frozenset({
+    "agent_9a2cd6a1d680fd1fca6aeddad2",   # Pearl Health
+    "agent_d2f34508b3c9677064ed705e1b",   # NNC Patient Services
+    "agent_29f7eca77618d86036402b0035",   # National Neuropathy (after-hours)
+    "agent_36f403199385903ade511361b1",   # Bold Connect IT Support
+    "agent_cd73312c434362ae1d9d074299",   # Bold Connect IT Support (Tagalog)
+    "agent_3223fb0f1d1d0fca2deabc9189",   # Bold Connect-Mercury Z Live
+                                           # (same end client as BK JR but a
+                                           # DIFFERENT agent — do NOT touch)
+    "agent_da562b934e0241be688e7b2c45",   # Bold Connect -Bold Business Live
+    "agent_afbb14aef83e3312dee84a01be",   # Ed Voice / ED JR (BK-adjacent scratch)
+    "agent_cb0e6af95c7a7e575cb3498e32",   # Outreach Dialer (template)
+    "agent_95fb2b3bbb3c5c281553bdcecb",   # Event/Webinar Reminder (template)
+})
+
+
+class ProtectedAgentError(RuntimeError):
+    """Raised when an operation targets another client's production agent."""
+
+    def __init__(self, agent_id: str | None = None, name: str | None = None):
+        self.agent_id = agent_id
+        self.name = name
+        details = []
+        if agent_id:
+            details.append(f"agent_id={agent_id!r}")
+        if name:
+            details.append(f"name={name!r}")
+        super().__init__(
+            "refusing to touch another client's production agent "
+            f"({', '.join(details) or 'unknown'}). "
+            f"Only BK JR agents are allowed "
+            f"(ids: {sorted(BKJR_AGENT_IDS)}, "
+            f"name prefixes: {BKJR_NAME_PREFIXES})."
+        )
+
+
+def _is_bkjr_name(name: str | None) -> bool:
+    """True if `name` matches a BK JR naming pattern (case-insensitive)."""
+    if not name:
+        return False
+    lower = name.strip().lower()
+    return any(lower.startswith(p) for p in BKJR_NAME_PREFIXES)
+
+
+def _is_bkjr_agent(agent_id: str | None, name: str | None = None) -> bool:
+    """True if the agent is BK JR-owned, by id OR name prefix."""
+    if agent_id and agent_id in BKJR_AGENT_IDS:
+        return True
+    if name and _is_bkjr_name(name):
+        return True
+    return False
+
+
+def assert_agent_allowed(
+    agent_id: str | None,
+    name: str | None = None,
+) -> None:
+    """
+    Refuse any denylisted agent. Called by every agent-targeting operation.
+
+    Raises ProtectedAgentError if the agent is on PROTECTED_AGENT_IDS OR if
+    `agent_id` is set but is neither BK JR-owned nor explicitly denylisted
+    (the latter is a defensive refusal for unknown agents — we err on the side
+    of not touching things we're not sure belong to BK JR).
+    """
+    # 1. Hard denylist — ALWAYS refuse these.
+    if agent_id and agent_id in PROTECTED_AGENT_IDS:
+        log.error("protected_agent_refused", agent_id=agent_id)
+        raise ProtectedAgentError(agent_id=agent_id)
+
+    # 2. If agent_id is provided but is NOT BK JR-owned, refuse.
+    # This is the "defense in depth" rule: we never read or mutate an agent
+    # we can't confirm belongs to BK JR. Wildcard agents (no id, just name)
+    # fall through to the name-prefix check.
+    if agent_id and not _is_bkjr_agent(agent_id, name):
+        log.error("unknown_agent_refused", agent_id=agent_id, name=name)
+        raise ProtectedAgentError(agent_id=agent_id, name=name)
+
 
 class RetellClient:
     def __init__(self, api_key: str | None = None):
@@ -117,12 +222,30 @@ class RetellClient:
 
     # ── Agent lifecycle (Ed's "spin up any agent on demand" ask) ────────────
 
-    def list_agents(self) -> list[dict]:
-        """List all Retell voice agents on the workspace.
+    def list_agents(
+        self,
+        include_other_clients: bool = False,
+        bkjr_only: bool | None = None,
+    ) -> list[dict]:
+        """
+        List BK JR-owned Retell voice agents on the workspace (default).
 
-        Ed's vision: BK Jr. can see the existing agents (screener, follow-up,
-        scheduler) and decide which one to dispatch a call to. Or spin up a
-        new one for a specific role.
+        By default ONLY returns agents that are in BKJR_AGENT_IDS OR whose name
+        matches BKJR_NAME_PREFIXES. Other clients' agents are filtered out at
+        this layer — we don't even know they exist from the MCP's perspective.
+
+        Args:
+            include_other_clients: True to return ALL agents (use only for
+                diagnostic/audit purposes — the MCP server never sets this).
+                A WARN is logged every time it's used.
+            bkjr_only: explicit override. None (default) returns only BK JR
+                agents. Pass False to get all agents; True is identical to
+                the default.
+
+        Returns:
+            List of agent dicts: {agent_id, name, voice_id, llm_id,
+            last_modified, is_bkjr}. The is_bkjr flag is True when the row
+            passed BK JR ownership check.
         """
         # NOTE: Retell's list endpoint is /list-agents (no /v2/ prefix).
         # /v2/agents, /v2/agent, and /v2/list-agents ALL 404. Verified live
@@ -130,20 +253,55 @@ class RetellClient:
         resp = httpx.get(f"{RETELL_API_BASE}/list-agents", headers=self.headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        agents = data if isinstance(data, list) else data.get("agents", [])
-        return [
-            {
-                "agent_id": a.get("agent_id"),
-                "name": a.get("agent_name") or a.get("name"),
+        raw_agents = data if isinstance(data, list) else data.get("agents", [])
+
+        rows: list[dict] = []
+        for a in raw_agents:
+            agent_id = a.get("agent_id")
+            name = a.get("agent_name") or a.get("name")
+            is_bkjr = _is_bkjr_agent(agent_id, name)
+            rows.append({
+                "agent_id": agent_id,
+                "name": name,
                 "voice_id": a.get("voice_id"),
-                "llm_id": (a.get("response_engine") or {}).get("llm_id") if isinstance(a.get("response_engine"), dict) else None,
+                "llm_id": (a.get("response_engine") or {}).get("llm_id")
+                          if isinstance(a.get("response_engine"), dict) else None,
                 "last_modified": a.get("last_modified") or a.get("updated_at"),
-            }
-            for a in agents
-        ]
+                "is_bkjr": is_bkjr,
+            })
+
+        # Default: BK JR only. Opt-out requires explicit flag.
+        if bkjr_only is False:
+            include_other_clients = True
+        if not include_other_clients:
+            rows = [r for r in rows if r["is_bkjr"]]
+        else:
+            log.warning(
+                "retell_list_agents_include_other_clients",
+                count=sum(1 for r in rows if not r["is_bkjr"]),
+                agent_ids=[r["agent_id"] for r in rows if not r["is_bkjr"]],
+            )
+
+        return rows
+
+    def list_bkjr_agents(self) -> list[dict]:
+        """
+        Explicit BK-JR-only listing. Functionally identical to
+        list_agents() with default args, but with a clearer intent at call
+        sites. Use this from MCP tools that ONLY need BK JR agents.
+        """
+        return self.list_agents(include_other_clients=False)
 
     def get_agent(self, agent_id: str) -> dict:
-        """Fetch full agent config (prompt, voice, tools, dynamic vars)."""
+        """
+        Fetch full agent config (prompt, voice, tools, dynamic vars).
+
+        Refuses if `agent_id` is on PROTECTED_AGENT_IDS or is not a known
+        BK JR agent. Read access is also gated because the project rule is
+        "never touch these agents", and a read is the first step of an
+        edit-by-hand mistake.
+        """
+        assert_agent_allowed(agent_id)
         # NOTE: like list_agents, the read endpoints live at /get-agent/{id},
         # /list-agents, /create-agent — NOT under /v2/. /v2/agent/{id} 404s.
         # The /v2/ prefix is only for create-phone-call + a few other write ops.
@@ -163,6 +321,12 @@ class RetellClient:
     ) -> dict:
         """Create a new Retell voice agent on the workspace.
 
+        Refuses if `name` matches a BK JR prefix (we don't want to create
+        agents that LOOK like BK JR agents but aren't in the allowlist — that
+        would let a future caller bypass the gate by referring to the new
+        agent by name). BK JR agents must be added to BKJR_AGENT_IDS
+        explicitly.
+
         Ed's ask: "build me an agent that interviews for X and asks about Y".
         BK JR will call this with a role description and the screening
         questions — Retell creates the agent, returns the ID, and BK JR
@@ -172,6 +336,10 @@ class RetellClient:
         matching the placeholders in `system_prompt` (e.g. candidate_name,
         role, requirements).
         """
+        # Refuse to create anything that LOOKS like a BK JR agent. The allowlist
+        # is the only source of truth — a name-matching bypass would defeat it.
+        if _is_bkjr_name(name):
+            raise ProtectedAgentError(name=name)
         payload: dict = {
             "agent_name": name,
             "response_engine": {
