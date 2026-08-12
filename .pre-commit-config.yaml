@@ -1,0 +1,76 @@
+# BK JR MCP — Pre-commit secret scanner
+#
+# Blocks ANY commit that adds plaintext secrets, API keys, tokens, or
+# passwords to the tracked repo. Catches:
+#
+#   - .env / .env.local / .env.production files
+#   - render.yaml / fly.toml / docker-compose.prod.yml (historically
+#     embedded plaintext secrets — use Coolify env vars instead)
+#   - Inline patterns: key_XXXXX, sk-XXXXX, eyJXXXX, AKIAXXXX,
+#     gho_XXXXX, xoxb-XXXXX, Bearer XXXX, etc.
+#   - High-entropy strings via gitleaks
+#   - Python lint (ruff) so broken code never lands
+#   - YAML syntax sanity
+#
+# Install (one-time per clone):
+#   pip install pre-commit
+#   pre-commit install
+#
+# Run manually against all tracked files:
+#   pre-commit run --all-files
+#
+# Bypass (only if you know what you're doing — gets logged):
+#   git commit --no-verify
+
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+fail_fast: false
+minimum_pre_commit_version: "3.0.0"
+
+repos:
+  # ── 1. Block known secret-bearing filenames BEFORE they reach git ───────
+  - repo: local
+    hooks:
+      - id: block-env-files
+        name: "BLOCK .env / .env.local / .env.production from being committed"
+        entry: bash scripts/block-env-files.sh
+        language: system
+        files: '^\.env(\.local|\.production)?$'
+
+      - id: block-deploy-manifest-with-secrets
+        name: "BLOCK render.yaml / fly.toml / docker-compose.prod.yml (embed secrets)"
+        entry: bash scripts/block-deploy-manifest.sh
+        language: system
+        files: '^(render\.yaml|fly\.toml|docker-compose\.prod\.ya?ml)$'
+
+  # ── 2. Scan staged content for known secret patterns (custom rules) ────
+  - repo: local
+    hooks:
+      - id: scan-known-secret-patterns
+        name: "scan: known API key / token prefixes"
+        entry: python scripts/scan_secrets.py
+        language: python
+        types_or: [text, shell]
+        exclude: '\.lock$|\.pyc$|__pycache__/|\.git/|\.venv/|node_modules/'
+
+  # ── 3. gitleaks — high-entropy string detection ────────────────────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.0
+    hooks:
+      - id: gitleaks
+        name: "gitleaks: detect high-entropy secrets"
+
+  # ── 4. Python lint (catches broken code at commit time) ─────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        name: "ruff: Python lint"
+        args: [--fix, --exit-non-zero-on-fix]
+
+  # ── 5. YAML / TOML syntax sanity ────────────────────────────────────────
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        name: "yamllint: YAML syntax"
