@@ -18,21 +18,18 @@ Exposes:
 # inspects the `lifespan` parameter at runtime, and stringified annotations
 # break it. (The MCP server in mcp_server.py has the same caveat.)
 
-import os
-import hmac
-import hashlib
 import json
-from contextlib import asynccontextmanager
+import os
 
 import structlog
-from fastapi import FastAPI, Request, HTTPException, Header
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
-from typing import Optional, List
+
+from flows.jobs import list_jobs, load_job
 
 from .agent import SMSRecruitmentAgent
 from .retell_client import RetellClient
-from flows.jobs import list_jobs, load_job
 
 log = structlog.get_logger(__name__)
 
@@ -63,7 +60,8 @@ app = FastAPI(title="Quo SMS Recruitment Agent", version="1.0.0")
 # CORS so BK's browser board (board.html) can poll /api/candidates cross-origin.
 # ponytail: allow_origins=["*"] is fine for a bearer-token-protected read API;
 # tighten to the board's actual origin if it's ever served somewhere fixed.
-from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -214,20 +212,20 @@ class SendSMSRequest(BaseModel):
     hallucinated. The first non-empty one wins. Same defensive pattern as
     /api/trigger-call.
     """
-    to: Optional[str] = None
-    phone: Optional[str] = None
-    phone_number: Optional[str] = None
-    candidate_phone: Optional[str] = None
-    to_number: Optional[str] = None
-    recipient: Optional[str] = None
-    number: Optional[str] = None
-    mobile: Optional[str] = None
-    phoneNumber: Optional[str] = None
-    toPhone: Optional[str] = None
+    to: str | None = None
+    phone: str | None = None
+    phone_number: str | None = None
+    candidate_phone: str | None = None
+    to_number: str | None = None
+    recipient: str | None = None
+    number: str | None = None
+    mobile: str | None = None
+    phoneNumber: str | None = None
+    toPhone: str | None = None
     message: str
-    from_number_id: Optional[str] = None
-    candidate_name: Optional[str] = None
-    track_state: Optional[bool] = True
+    from_number_id: str | None = None
+    candidate_name: str | None = None
+    track_state: bool | None = True
 
     def resolved_to(self) -> str:
         for v in (self.to, self.phone, self.phone_number, self.candidate_phone,
@@ -275,7 +273,7 @@ async def send_sms(req: SendSMSRequest, authorization: str = Header(None)):
 class RelayRequest(BaseModel):
     to: str           # Candidate phone number
     message: str      # What BK typed in Telegram
-    from_number_id: Optional[str] = None
+    from_number_id: str | None = None
 
 
 @app.post("/api/relay")
@@ -296,7 +294,7 @@ class Candidate(BaseModel):
     location: str = ""
 
 class BulkRequest(BaseModel):
-    candidates: List[Candidate]
+    candidates: list[Candidate]
     template: str = "mercury_initial"
     extra_vars: dict = {}
 
@@ -314,15 +312,15 @@ async def bulk_outreach(req: BulkRequest, authorization: str = Header(None)):
 class JobCandidate(BaseModel):
     name: str
     phone: str
-    location: Optional[str] = None
+    location: str | None = None
 
 
 class BulkJobRequest(BaseModel):
     job_id: str
-    candidates: List[JobCandidate]
+    candidates: list[JobCandidate]
     skip_if_contacted: bool = True
     dry_run: bool = False
-    max_per_run: Optional[int] = None
+    max_per_run: int | None = None
 
 
 @app.post("/api/bulk_job")
@@ -663,8 +661,8 @@ async def hermes_tool(req: ToolRequest, authorization: str = Header(None)):
                   "gdrive_create_folder", "gdrive_share", "retell_list_agents",
                   "retell_list_bkjr_agents", "retell_create_agent",
                   "retell_get_agent", "retell_place_call", "process_screening_result"):
-        from .retell_client import RetellClient
         from .composio_google import ComposioGoogleClient
+        from .retell_client import RetellClient
         g = ComposioGoogleClient()
 
         if tool == "process_screening_result":

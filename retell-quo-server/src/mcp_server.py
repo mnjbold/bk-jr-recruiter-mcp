@@ -71,7 +71,7 @@ def _call(tool: str, params: dict) -> dict:
     if resp.status_code >= 400:
         try:
             detail = resp.json()
-        except Exception:
+        except ValueError:
             detail = resp.text
         raise RuntimeError(f"backend {resp.status_code}: {detail}")
     return resp.json()
@@ -346,7 +346,7 @@ def gcal_create_event(
     summary: str,
     start: str,
     end: str,
-    attendees: list = None,
+    attendees: list | None = None,
     description: str = "",
 ) -> dict:
     """
@@ -431,7 +431,7 @@ def process_screening_result(
     phone: str = "",
     candidate_name: str = "",
     screening_result: str = "",
-    custom_analysis_fields: dict = None,
+    custom_analysis_fields: dict | None = None,
 ) -> dict:
     """
     Post-screening automation: branch on a Retell call's screening outcome.
@@ -526,7 +526,7 @@ def retell_place_call(
     to_number: str,
     agent_id: str = "",
     from_number: str = "",
-    dynamic_variables: dict = None,
+    dynamic_variables: dict | None = None,
 ) -> dict:
     """
     Place an outbound call to ANY Retell agent (not just the default
