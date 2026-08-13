@@ -1,4 +1,4 @@
-﻿"""
+"""
 SMS Agent FastAPI Server
 Exposes:
   POST /webhook/quo       — Quo inbound SMS webhook
@@ -657,6 +657,106 @@ async def hermes_tool(req: ToolRequest, authorization: str = Header(None)):
     # account hasn't authorized the additional Google services yet, the call
     # returns 400/401 from Composio — the user must reconnect that scope at
     # app.composio.dev.
+    elif tool == "retell_get_call":
+        call_id = params.get("call_id")
+        if not call_id:
+            raise HTTPException(status_code=400, detail="'call_id' is required.")
+        retell = RetellClient()
+        return retell.get_call(call_id)
+
+    elif tool == "retell_list_calls":
+        retell = RetellClient()
+        return {"calls": retell.list_calls(
+            filters=params.get("filters") or {},
+            limit=int(params.get("limit", 20)),
+        )}
+
+    elif tool == "retell_get_llm":
+        llm_id = params.get("llm_id")
+        if not llm_id:
+            raise HTTPException(status_code=400, detail="'llm_id' is required.")
+        retell = RetellClient()
+        return retell.get_llm(llm_id)
+
+    elif tool == "retell_update_llm":
+        llm_id = params.get("llm_id")
+        patch = params.get("patch") or {}
+        if not llm_id or not patch:
+            raise HTTPException(status_code=400, detail="'llm_id' and 'patch' are required.")
+        retell = RetellClient()
+        return retell.update_llm(llm_id, patch)
+
+    elif tool == "retell_list_phone_numbers":
+        retell = RetellClient()
+        return {"numbers": retell.list_phone_numbers()}
+
+    elif tool == "retell_update_phone_number":
+        number = params.get("number")
+        patch = params.get("patch") or {}
+        if not number or not patch:
+            raise HTTPException(status_code=400, detail="'number' and 'patch' are required.")
+        retell = RetellClient()
+        return retell.update_phone_number(number, patch)
+
+    elif tool == "retell_get_concurrency":
+        retell = RetellClient()
+        return retell.get_concurrency()
+
+    elif tool == "retell_update_live_call":
+        call_id = params.get("call_id")
+        body = params.get("body") or {}
+        if not call_id or not body:
+            raise HTTPException(status_code=400, detail="'call_id' and 'body' are required.")
+        retell = RetellClient()
+        return retell.update_live_call(call_id, body)
+
+    elif tool == "preflight":
+        if hasattr(agent, "preflight"):
+            return agent.preflight()
+        return {"ok": False, "error": "preflight() not implemented on agent",
+                "hint": "see mcp_server.py preflight docstring for the checklist"}
+
+    elif tool == "get_practice_mode":
+        return {"practice_mode": bool(getattr(agent, "practice_mode", True))}
+
+    elif tool == "set_practice_mode":
+        on = bool(params.get("on", True))
+        if hasattr(agent, "set_practice_mode"):
+            agent.set_practice_mode(on)
+        elif hasattr(agent, "practice_mode"):
+            agent.practice_mode = on
+        else:
+            # No state to mutate — return current value
+            return {"ok": False, "error": "set_practice_mode not implemented",
+                    "practice_mode": bool(getattr(agent, "practice_mode", True))}
+        return {"ok": True, "practice_mode": on}
+
+    elif tool == "list_opt_outs":
+        # Opt-outs live in state — surface them as a list
+        try:
+            if hasattr(agent, "list_opt_outs"):
+                return {"opt_outs": agent.list_opt_outs()}
+            if hasattr(agent, "opt_outs"):
+                return {"opt_outs": list(agent.opt_outs)}
+        except Exception as e:  # noqa: BLE001
+            log.warning("list_opt_outs_failed", error=str(e))
+        return {"opt_outs": []}
+
+    elif tool == "list_candidates":
+        return agent.candidate_states
+
+    elif tool == "get_candidate_by_phone":
+        phone = params.get("phone", "")
+        phone_digits = "".join(c for c in phone if c.isdigit())[-10:]
+        for c in agent.candidate_states.values():
+            cand_digits = "".join(c2 for c2 in str(c.get("phone", "")) if c2.isdigit())[-10:]
+            if cand_digits == phone_digits:
+                return {"found": True, "candidate": c}
+        return {"found": False, "phone": phone}
+
+    elif tool == "list_phone_numbers":
+        return {"numbers": agent.quo.list_numbers()}
+
     elif tool in ("gmail_send", "gcal_list_events", "gcal_create_event",
                   "gdrive_create_folder", "gdrive_share", "retell_list_agents",
                   "retell_list_bkjr_agents", "retell_create_agent",
@@ -782,109 +882,9 @@ async def hermes_tool(req: ToolRequest, authorization: str = Header(None)):
         # handlers below either delegate to RetellClient or return a clear
         # "not yet wired" error so the dispatcher stops returning 400
         # "Unknown tool" for tools that are clearly defined on the MCP side.
-        elif tool == "retell_get_call":
-            call_id = params.get("call_id")
-            if not call_id:
-                raise HTTPException(status_code=400, detail="'call_id' is required.")
-            retell = RetellClient()
-            return retell.get_call(call_id)
-
-        elif tool == "retell_list_calls":
-            retell = RetellClient()
-            return {"calls": retell.list_calls(
-                filters=params.get("filters") or {},
-                limit=int(params.get("limit", 20)),
-            )}
-
-        elif tool == "retell_get_llm":
-            llm_id = params.get("llm_id")
-            if not llm_id:
-                raise HTTPException(status_code=400, detail="'llm_id' is required.")
-            retell = RetellClient()
-            return retell.get_llm(llm_id)
-
-        elif tool == "retell_update_llm":
-            llm_id = params.get("llm_id")
-            patch = params.get("patch") or {}
-            if not llm_id or not patch:
-                raise HTTPException(status_code=400, detail="'llm_id' and 'patch' are required.")
-            retell = RetellClient()
-            return retell.update_llm(llm_id, patch)
-
-        elif tool == "retell_list_phone_numbers":
-            retell = RetellClient()
-            return {"numbers": retell.list_phone_numbers()}
-
-        elif tool == "retell_update_phone_number":
-            number = params.get("number")
-            patch = params.get("patch") or {}
-            if not number or not patch:
-                raise HTTPException(status_code=400, detail="'number' and 'patch' are required.")
-            retell = RetellClient()
-            return retell.update_phone_number(number, patch)
-
-        elif tool == "retell_get_concurrency":
-            retell = RetellClient()
-            return retell.get_concurrency()
-
-        elif tool == "retell_update_live_call":
-            call_id = params.get("call_id")
-            body = params.get("body") or {}
-            if not call_id or not body:
-                raise HTTPException(status_code=400, detail="'call_id' and 'body' are required.")
-            retell = RetellClient()
-            return retell.update_live_call(call_id, body)
-
         # ── Safety / practice-mode / preflight tools ───────────────────────
-        elif tool == "preflight":
-            if hasattr(agent, "preflight"):
-                return agent.preflight()
-            return {"ok": False, "error": "preflight() not implemented on agent",
-                    "hint": "see mcp_server.py preflight docstring for the checklist"}
-
-        elif tool == "get_practice_mode":
-            return {"practice_mode": bool(getattr(agent, "practice_mode", True))}
-
-        elif tool == "set_practice_mode":
-            on = bool(params.get("on", True))
-            if hasattr(agent, "set_practice_mode"):
-                agent.set_practice_mode(on)
-            elif hasattr(agent, "practice_mode"):
-                agent.practice_mode = on
-            else:
-                # No state to mutate — return current value
-                return {"ok": False, "error": "set_practice_mode not implemented",
-                        "practice_mode": bool(getattr(agent, "practice_mode", True))}
-            return {"ok": True, "practice_mode": on}
-
-        elif tool == "list_opt_outs":
-            # Opt-outs live in state — surface them as a list
-            try:
-                if hasattr(agent, "list_opt_outs"):
-                    return {"opt_outs": agent.list_opt_outs()}
-                if hasattr(agent, "opt_outs"):
-                    return {"opt_outs": list(agent.opt_outs)}
-            except Exception as e:  # noqa: BLE001
-                log.warning("list_opt_outs_failed", error=str(e))
-            return {"opt_outs": []}
-
         # ── Core recruiting (alias `list_candidates` for the MCP tool) ─────
-        elif tool == "list_candidates":
-            return agent.candidate_states
-
-        elif tool == "get_candidate_by_phone":
-            phone = params.get("phone", "")
-            phone_digits = "".join(c for c in phone if c.isdigit())[-10:]
-            for c in agent.candidate_states.values():
-                cand_digits = "".join(c2 for c2 in str(c.get("phone", "")) if c2.isdigit())[-10:]
-                if cand_digits == phone_digits:
-                    return {"found": True, "candidate": c}
-            return {"found": False, "phone": phone}
-
         # ── Phone-number alias (MCP uses `list_phone_numbers`, dispatcher
         #    already had `list_numbers`; support both) ─────────────────────
-        elif tool == "list_phone_numbers":
-            return {"numbers": agent.quo.list_numbers()}
-
     else:
         raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")
