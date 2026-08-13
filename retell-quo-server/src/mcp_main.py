@@ -124,7 +124,7 @@ async def health_app(scope, receive, send):
         "status": "ok",
         "server": "bk-jr-recruiting",
         "version": "1.9.0",
-        "tools": 24,
+        "tools": len(mcp._tool_manager.list_tools()) if hasattr(mcp, "_tool_manager") else 24,
         "auth": "bearer-required",
     }).encode()
     await send({

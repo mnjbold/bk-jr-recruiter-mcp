@@ -27,7 +27,7 @@ client speaks remote MCP natively or needs a stdio bridge.
 Responses are SSE-framed (`data: {...}`) even for single calls - parse accordingly.
 
 ## Verify a connector
-`GET /health` -> `{"status":"ok","tools":24,"auth":"bearer-required"}`
+`GET /health` -> `{"status":"ok","tools":27,"auth":"bearer-required"}`
 
 Auth check - the pass signal is **401 / 401 / 200**:
 no token -> 401, wrong token -> 401, correct token -> 200.
