@@ -258,8 +258,8 @@ def load_candidate_states() -> dict[str, dict]:
     for row in rows:
         try:
             out[row["phone"]] = _json.loads(row["state_json"])
-        except Exception:
-            log.warning("candidate_state_parse_failed", phone=row["phone"])
+        except (ValueError, TypeError) as exc:
+            log.warning("candidate_state_parse_failed", phone=row["phone"], error=str(exc))
     return out
 
 
