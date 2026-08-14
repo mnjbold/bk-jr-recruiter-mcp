@@ -641,7 +641,6 @@ async def hermes_tool(req: ToolRequest, authorization: str = Header(None)):
         from the env (or passed). Useful for AI agents that want to drive the
         recruiting conversation programmatically.
         """
-        from .retell_client import RetellClient
         retell = RetellClient()
         agent_id = params.get("agent_id") or os.environ.get("RETELL_CHAT_AGENT_ID", "agent_29eea2101e81cd761b7928dcd7")
         message = params.get("message")
@@ -762,7 +761,6 @@ async def hermes_tool(req: ToolRequest, authorization: str = Header(None)):
                   "retell_list_bkjr_agents", "retell_create_agent",
                   "retell_get_agent", "retell_place_call", "process_screening_result"):
         from .composio_google import ComposioGoogleClient
-        from .retell_client import RetellClient
         g = ComposioGoogleClient()
 
         if tool == "process_screening_result":
