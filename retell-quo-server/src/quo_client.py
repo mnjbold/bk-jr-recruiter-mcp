@@ -54,14 +54,34 @@ class QuoClient:
         log.info("sms_sent", to=to, message_id=data.get("id"), status=data.get("status"))
         return data
 
-    def list_messages(self, phone_number_id: str, participant: str | None = None, limit: int = 25) -> list[dict]:
-        """List messages for a phone number, optionally filtered to a specific contact."""
-        params = {"phoneNumberId": phone_number_id, "maxResults": limit}
+    def list_messages(
+        self,
+        phone_number_id: str,
+        participant: str | None = None,
+        limit: int = 25,
+        page_token: str | None = None,
+    ) -> dict:
+        """
+        List messages for a phone number, optionally filtered to one contact.
+
+        Quo's REST API requires `participants` as a JSON array — passing it as a
+        single string returns 400 "Expected array". Quo also paginates via
+        `nextPageToken`. Returns the raw response dict so callers can paginate
+        and so the MCP layer can surface pagination state.
+        """
+        params: dict = {"phoneNumberId": phone_number_id, "maxResults": limit}
         if participant:
-            params["participants"] = participant
-        resp = httpx.get(f"{QUO_API_BASE}/messages", headers=self.headers, params=params, timeout=15)
+            params["participants"] = [participant]
+        if page_token:
+            params["pageToken"] = page_token
+        resp = httpx.get(
+            f"{QUO_API_BASE}/messages",
+            headers=self.headers,
+            params=params,
+            timeout=15,
+        )
         resp.raise_for_status()
-        return resp.json().get("data", [])
+        return resp.json()
 
     def get_message(self, message_id: str) -> dict:
         resp = httpx.get(f"{QUO_API_BASE}/messages/{message_id}", headers=self.headers, timeout=10)
@@ -70,12 +90,28 @@ class QuoClient:
 
     # ── Conversations ─────────────────────────────────────────────────────────
 
-    def list_conversations(self, phone_number_id: str, limit: int = 20) -> list[dict]:
-        """List active conversations on BK's Quo number."""
-        params = {"phoneNumberId": phone_number_id, "maxResults": limit}
-        resp = httpx.get(f"{QUO_API_BASE}/conversations", headers=self.headers, params=params, timeout=15)
+    def list_conversations(
+        self,
+        phone_number_id: str,
+        limit: int = 20,
+        page_token: str | None = None,
+    ) -> dict:
+        """
+        List conversations on BK's Quo number. Quo paginates this endpoint
+        (maxResults ≤ 100) and returns a `nextPageToken` when more exist.
+        Returns the raw response dict so callers can paginate.
+        """
+        params: dict = {"phoneNumberId": phone_number_id, "maxResults": limit}
+        if page_token:
+            params["pageToken"] = page_token
+        resp = httpx.get(
+            f"{QUO_API_BASE}/conversations",
+            headers=self.headers,
+            params=params,
+            timeout=15,
+        )
         resp.raise_for_status()
-        return resp.json().get("data", [])
+        return resp.json()
 
     # ── Contacts ─────────────────────────────────────────────────────────────
 
@@ -146,19 +182,78 @@ class QuoClient:
 
     # ── Calls ────────────────────────────────────────────────────────────────
 
-    def list_calls(self, phone_number_id: str, participant: str, max_results: int = 100,
-                    page_token: str | None = None) -> dict:
+    def list_calls(
+        self,
+        phone_number_id: str,
+        participant: str,
+        max_results: int = 100,
+        page_token: str | None = None,
+    ) -> dict:
         """
         List calls between BK's Quo number and a single participant.
         NOTE: /v1/calls requires exactly one participant (1:1 only) — no bulk/no-filter mode.
         Returns the raw response dict (data, totalItems, nextPageToken) so callers can paginate.
         """
-        params = {"phoneNumberId": phone_number_id, "participants": participant, "maxResults": max_results}
+        params: dict = {
+            "phoneNumberId": phone_number_id,
+            "participants": [participant],   # Quo expects an array
+            "maxResults": max_results,
+        }
         if page_token:
             params["pageToken"] = page_token
         resp = httpx.get(f"{QUO_API_BASE}/calls", headers=self.headers, params=params, timeout=15)
         resp.raise_for_status()
         return resp.json()
+
+    def get_message(self, message_id: str) -> dict:
+        """Fetch a single message (full body + delivery state) by id."""
+        resp = httpx.get(
+            f"{QUO_API_BASE}/messages/{message_id}",
+            headers=self.headers,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return resp.json().get("data", {})
+
+    def unregister_webhook(self, webhook_id: str) -> dict:
+        """
+        Delete a Quo webhook subscription. The id comes from list_webhooks().
+        Returns {ok: True} on 2xx, raises on 4xx/5xx (so the caller sees 404s
+        for already-deleted hooks distinctly from successful removals).
+        """
+        # OpenPhone's webhook-delete endpoint expects /v1/webhooks/{id}.
+        # Some accounts use /v1/webhooks/{id} directly; others route via
+        # /v1/webhooks/message/{id}. We try the message-scoped path first
+        # because that's what create_message_webhook returns.
+        for path in (
+            f"{QUO_API_BASE}/webhooks/message/{webhook_id}",
+            f"{QUO_API_BASE}/webhooks/{webhook_id}",
+        ):
+            resp = httpx.delete(path, headers=self.headers, timeout=10)
+            if resp.status_code < 400:
+                return resp.json().get("data", {"id": webhook_id})
+            if resp.status_code == 404:
+                continue  # try the other path
+            resp.raise_for_status()
+        # Both 404'd — id is gone.
+        return {"id": webhook_id, "ok": True, "note": "already-deleted"}
+
+    def get_call_transcript(self, call_id: str) -> dict:
+        """
+        Fetch transcript + metadata for a single Quo voice call.
+
+        Quo's /v1/calls/{id} returns the transcript as an array of utterances
+        (speaker, text, started_at). This is the same shape Retell's
+        call_analyzed webhook posts, so the MCP and webhook paths stay
+        consistent.
+        """
+        resp = httpx.get(
+            f"{QUO_API_BASE}/calls/{call_id}",
+            headers=self.headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json().get("data", {})
 
     def list_all_calls(self, phone_number_id: str, participant: str) -> list[dict]:
         """Paginate through every call for a single participant."""
@@ -167,7 +262,12 @@ class QuoClient:
     # ── Generic pagination helpers ───────────────────────────────────────────
 
     def _paginate(self, path: str, params: dict) -> list[dict]:
-        """Follow nextPageToken until exhausted. Retries once on 429 with backoff."""
+        """Follow nextPageToken until exhausted. Retries once on 429 with backoff.
+
+        The caller is responsible for passing `participants` as a list
+        (Quo's API requires it). To keep behaviour identical, this method
+        only handles page_token plumbing — it does NOT touch participants.
+        """
         import time
         out: list[dict] = []
         page_token = None
@@ -191,7 +291,7 @@ class QuoClient:
     def _paginate_participant(self, path: str, phone_number_id: str, participant: str) -> list[dict]:
         return self._paginate(path, {
             "phoneNumberId": phone_number_id,
-            "participants": participant,
+            "participants": [participant],   # Quo expects array
             "maxResults": 100,
         })
 
@@ -213,7 +313,11 @@ class QuoClient:
         Much cheaper than list_all_messages() at 1000+-candidate scale since
         it doesn't paginate the full history for every candidate.
         """
-        params = {"phoneNumberId": phone_number_id, "participants": participant, "maxResults": 1}
+        params = {
+            "phoneNumberId": phone_number_id,
+            "participants": [participant],   # Quo expects array
+            "maxResults": 1,
+        }
         resp = httpx.get(f"{QUO_API_BASE}/messages", headers=self.headers, params=params, timeout=10)
         resp.raise_for_status()
         return len(resp.json().get("data", [])) > 0

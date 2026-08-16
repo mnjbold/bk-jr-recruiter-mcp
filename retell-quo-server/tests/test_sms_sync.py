@@ -31,17 +31,29 @@ from sms_sync import (
 
 
 class FakeQuo:
-    """In-memory stand-in for QuoClient.list_conversations."""
+    """In-memory stand-in for QuoClient.list_conversations + the new
+    pagination contract (returns a dict with `data` and optional
+    `nextPageToken`)."""
     def __init__(self, conversations=None, fail=False):
         self.conversations = conversations or []
         self.fail = fail
         self.calls: list[dict] = []
+        self.default_number_id = "PNdefault"
 
-    def list_conversations(self, phone_number_id):
-        self.calls.append({"phone_number_id": phone_number_id})
+    def list_conversations(self, phone_number_id=None, limit=20, page_token=None):
+        self.calls.append({
+            "phone_number_id": phone_number_id,
+            "limit": limit,
+            "page_token": page_token,
+        })
         if self.fail:
             raise RuntimeError("simulated Quo failure")
-        return self.conversations
+        # Mimic the new return shape — dict with `data`. Older callers
+        # still accept a list, so we return dict here.
+        return {"data": list(self.conversations), "nextPageToken": None}
+
+    def get_default_number_id(self) -> str:
+        return self.default_number_id
 
 
 class FakeAgent:
