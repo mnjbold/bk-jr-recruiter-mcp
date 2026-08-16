@@ -124,6 +124,40 @@ async def quo_webhook(request: Request):
 
     log.info("quo_webhook_received", evt=payload.get("event", "unknown"))
 
+    # Persist every webhook receipt so we can answer "what did the candidate
+    # say at 14:23 today?" later. Logged BEFORE agent.handle_inbound so we
+    # record the event even if handler crashes.
+    try:
+        from .webhook_log import record as _wh_record
+        data = payload.get("data", {}) if isinstance(payload, dict) else {}
+        from_number = ""
+        if isinstance(data.get("from"), dict):
+            from_number = data["from"].get("phoneNumber", "")
+        elif data.get("from"):
+            from_number = str(data["from"])
+        _wh_record(
+            source="quo",
+            event_type=str(payload.get("event", "unknown")),
+            phone=from_number or None,
+            direction="inbound",  # Quo's "message.received" webhook is inbound by definition
+            message_id=str(data.get("id", "")) or None,
+            body=str(data.get("body") or data.get("content") or "")[:1000] or None,
+            payload=payload,
+        )
+    except Exception as wh_err:  # noqa: BLE001
+        log.warning("webhook_log_quo_failed", error=str(wh_err))
+
+    # Push a quick GChat notification so BK sees it without checking the inbox.
+    # Best-effort: failure to notify does NOT fail the webhook (200 OK still
+    # needed for Quo to consider it delivered).
+    try:
+        from .notify import notify_inbound_sms
+        body_text = str(data.get("body") or data.get("content") or "")
+        if from_number and body_text:
+            notify_inbound_sms(from_number, body_text, message_id=str(data.get("id", "")))
+    except Exception as n_err:  # noqa: BLE001
+        log.warning("gchat_inbound_notify_failed", error=str(n_err))
+
     result = agent.handle_inbound(payload)
     return {"ok": True, "result": result}
 
@@ -144,6 +178,65 @@ async def retell_webhook(request: Request, x_retell_signature: str = Header(None
 
     payload = json.loads(raw_body)
     log.info("retell_webhook_received", evt=payload.get("event", "unknown"))
+
+    # Persist the webhook event so we can pull call transcripts + metadata
+    # later without grepping structlog. call_analyzed events carry the full
+    # transcript + custom_analysis_fields in `call` / `data` (Retell's
+    # documentation says "transcript" lives in call.transcript).
+    try:
+        from .webhook_log import record as _wh_record
+        call = payload.get("call") or payload.get("data") or {}
+        if not isinstance(call, dict):
+            call = {}
+        to_num = call.get("to") or ""
+        if isinstance(to_num, list) and to_num:
+            to_num = to_num[0]
+        from_num = call.get("from") or ""
+        if isinstance(from_num, list) and from_num:
+            from_num = from_num[0]
+        # Prefer the candidate's number (the "to" side of an outbound call).
+        candidate_phone = to_num or from_num or ""
+        transcript = call.get("transcript") or []
+        excerpt = ""
+        if isinstance(transcript, list) and transcript:
+            # Concatenate the first three utterances for the body column so
+            # the log search hits useful snippets, not just transcripts.
+            pieces = []
+            for utt in transcript[:3]:
+                if isinstance(utt, dict):
+                    pieces.append(f"{utt.get('speaker','?')}: {utt.get('text','')}")
+                else:
+                    pieces.append(str(utt))
+            excerpt = " | ".join(pieces)[:600]
+        elif isinstance(transcript, str):
+            excerpt = transcript[:600]
+        _wh_record(
+            source="retell",
+            event_type=str(payload.get("event", "unknown")),
+            phone=str(candidate_phone) or None,
+            call_id=str(call.get("call_id") or call.get("id") or ""),
+            body=excerpt or None,
+            payload=payload,
+        )
+    except Exception as wh_err:  # noqa: BLE001
+        log.warning("webhook_log_retell_failed", error=str(wh_err))
+
+    # Push a GChat notification for the three call event types BK cares about.
+    try:
+        from .notify import notify_call_event
+        evt = str(payload.get("event", ""))
+        if evt in ("call_started", "call_ended", "call_analyzed"):
+            call = payload.get("call") or payload.get("data") or {}
+            if isinstance(call, dict):
+                notify_call_event(
+                    event_type=evt,
+                    call_id=str(call.get("call_id") or call.get("id") or ""),
+                    phone=str(call.get("to") or call.get("from") or ""),
+                    summary=str(call.get("call_analysis", {}).get("call_summary", "")
+                               if isinstance(call.get("call_analysis"), dict) else ""),
+                )
+    except Exception as n_err:  # noqa: BLE001
+        log.warning("gchat_call_notify_failed", error=str(n_err))
 
     result = agent.handle_retell_webhook(payload)
     return {"ok": True, "result": result}
@@ -507,8 +600,17 @@ async def hermes_tool(req: ToolRequest, authorization: str = Header(None)):
         return {"numbers": numbers}
 
     elif tool == "list_conversations":
+        """[legacy simple branch — newer paginated version below at 4-space indent]
+        Kept here only for callers that POST without explicit page_token. Prefer
+        the dispatcher branch below; this one stays for backward compat with
+        the existing MCP proxy.
+        """
         number_id = params.get("phone_number_id") or os.environ.get("QUO_BK_NUMBER_ID")
-        convos = agent.quo.list_conversations(number_id)
+        convos = agent.quo.list_conversations(number_id, limit=int(params.get("limit", 20)))
+        # New return shape is a dict {data, nextPageToken}; accept either.
+        if isinstance(convos, dict):
+            return {"conversations": convos.get("data", []),
+                    "next_page_token": convos.get("nextPageToken")}
         return {"conversations": convos}
 
     elif tool == "sync_sms_threads_to_candidates":
@@ -884,5 +986,166 @@ async def hermes_tool(req: ToolRequest, authorization: str = Header(None)):
         # ── Core recruiting (alias `list_candidates` for the MCP tool) ─────
         # ── Phone-number alias (MCP uses `list_phone_numbers`, dispatcher
         #    already had `list_numbers`; support both) ─────────────────────
+
+    # ── Message-context + live-webhook tools (2026-08-16) ────────────────
+    # Reads from Quo + Retell, surfaces the data BK JR's MCP used to hide.
+    # Every branch is at 4-space indent inside hermes_tool — see
+    # bk-jr-pipeline/references/dispatcher-structure-gotcha.md.
+
+    elif tool == "list_messages":
+        """
+        Read SMS message bodies (with direction: inbound / outbound) for a
+        Quo number, optionally filtered to a single participant.
+
+        Replaces the missing 'response body' gap that previously made
+        cross-match tables impossible. Quo's REST paginates via nextPageToken;
+        pass `page_token` to follow the cursor.
+        """
+        number_id = params.get("phone_number_id") or os.environ.get("QUO_BK_NUMBER_ID")
+        if not number_id:
+            raise HTTPException(status_code=400, detail="'phone_number_id' is required (or set QUO_BK_NUMBER_ID env).")
+        participant = params.get("participant") or params.get("phone") or ""
+        limit = int(params.get("limit", 50))
+        limit = max(1, min(limit, 100))
+        page_token = params.get("page_token") or None
+        try:
+            resp = agent.quo.list_messages(
+                phone_number_id=number_id,
+                participant=participant or None,
+                limit=limit,
+                page_token=page_token,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Quo list_messages failed: {e}")
+        return {
+            "messages": resp.get("data", []) if isinstance(resp, dict) else [],
+            "next_page_token": resp.get("nextPageToken") if isinstance(resp, dict) else None,
+            "total_items": resp.get("totalItems") if isinstance(resp, dict) else None,
+            "count": len(resp.get("data", [])) if isinstance(resp, dict) else 0,
+        }
+
+    elif tool == "list_calls":
+        """
+        List Quo voice calls with a single participant. Quo requires 1:1;
+        pass `participant` (E.164) to scope. Paginated.
+        """
+        number_id = params.get("phone_number_id") or os.environ.get("QUO_BK_NUMBER_ID")
+        if not number_id:
+            raise HTTPException(status_code=400, detail="'phone_number_id' is required (or set QUO_BK_NUMBER_ID env).")
+        participant = params.get("participant") or params.get("phone") or ""
+        if not participant:
+            raise HTTPException(status_code=400, detail="'participant' (E.164) is required — Quo /calls only supports 1:1.")
+        limit = int(params.get("limit", 50))
+        limit = max(1, min(limit, 100))
+        page_token = params.get("page_token") or None
+        try:
+            resp = agent.quo.list_calls(
+                phone_number_id=number_id,
+                participant=participant,
+                max_results=limit,
+                page_token=page_token,
+            )
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Quo list_calls failed: {e}")
+        return {
+            "calls": resp.get("data", []) if isinstance(resp, dict) else [],
+            "next_page_token": resp.get("nextPageToken") if isinstance(resp, dict) else None,
+            "total_items": resp.get("totalItems") if isinstance(resp, dict) else None,
+        }
+
+    elif tool == "get_call_transcript":
+        """
+        Fetch transcript + metadata for one Retell call (or Quo voice call).
+        Returns utterances [{speaker, text, started_at}], call_analysis,
+        recording_url, etc. Same shape Retell posts in call_analyzed webhook.
+        """
+        call_id = params.get("call_id") or params.get("id") or ""
+        if not call_id:
+            raise HTTPException(status_code=400, detail="'call_id' is required.")
+        # Prefer Retell (more transcript detail) — fall back to Quo.
+        try:
+            retell = RetellClient()
+            retell_resp = retell.get_call(call_id)
+            if retell_resp:
+                return {"source": "retell", "call_id": call_id, "data": retell_resp}
+        except Exception as e:  # noqa: BLE001
+            log.warning("retell_get_call_failed", call_id=call_id, error=str(e))
+        try:
+            quo_resp = agent.quo.get_call_transcript(call_id)
+            return {"source": "quo", "call_id": call_id, "data": quo_resp}
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Both Retell and Quo failed for {call_id}: {e}")
+
+    elif tool == "register_webhook":
+        """
+        Register a Quo webhook subscription to receive live inbound events
+        on BK's number. Default URL is THIS backend (/webhook/quo) — only
+        override for testing (e.g. ngrok) or alternative integrations.
+        """
+        number_id = params.get("phone_number_id") or os.environ.get("QUO_BK_NUMBER_ID")
+        if not number_id:
+            raise HTTPException(status_code=400, detail="'phone_number_id' is required (or set QUO_BK_NUMBER_ID env).")
+        target_url = params.get("url") or f"https://{os.environ.get('PUBLIC_BACKEND_HOST', 'bkjr-api.getbijou.xyz')}/webhook/quo"
+        try:
+            result = agent.quo.create_message_webhook(url=target_url, phone_number_id=number_id)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Quo create_message_webhook failed: {e}")
+        return {"ok": True, "url": target_url, "webhook_id": result.get("id") if isinstance(result, dict) else None, "result": result}
+
+    elif tool == "list_webhooks":
+        """List Quo webhook subscriptions on this account."""
+        try:
+            webhooks = agent.quo.list_webhooks()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Quo list_webhooks failed: {e}")
+        # webhooks may be a list directly or wrapped in {"data": [...]}.
+        if isinstance(webhooks, dict):
+            return {"webhooks": webhooks.get("data", []), "count": len(webhooks.get("data", []))}
+        return {"webhooks": list(webhooks or []), "count": len(webhooks or [])}
+
+    elif tool == "unregister_webhook":
+        """
+        Remove a Quo webhook subscription. `webhook_id` comes from
+        list_webhooks() — typically a string like 'WH_abc123'.
+        Idempotent: removing an already-gone webhook returns ok.
+        """
+        webhook_id = params.get("webhook_id") or params.get("id") or ""
+        if not webhook_id:
+            raise HTTPException(status_code=400, detail="'webhook_id' is required.")
+        try:
+            result = agent.quo.unregister_webhook(webhook_id)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"Quo unregister_webhook failed: {e}")
+        return {"ok": True, "webhook_id": webhook_id, "result": result}
+
+    elif tool == "list_webhook_events":
+        """
+        Recent webhook event log — every Quo + Retell event since the
+        log was created. Newest first. Filters: source ('quo'|'retell'),
+        phone (E.164), since_seconds (relative). Limit ≤ 500.
+        """
+        from .webhook_log import recent as _recent
+        limit = int(params.get("limit", 50))
+        source = params.get("source") or None
+        phone = params.get("phone") or None
+        since_seconds = params.get("since_seconds")
+        try:
+            since_seconds_int = int(since_seconds) if since_seconds is not None else None
+        except (TypeError, ValueError):
+            since_seconds_int = None
+        rows = _recent(
+            limit=limit,
+            source=source,
+            phone=phone,
+            since_seconds=since_seconds_int,
+        )
+        # Don't return the full payload JSON — too heavy. Truncate to first 400 chars
+        # of payload so callers can see the shape, but the heavy stuff can be
+        # re-pulled via a dedicated tool if needed.
+        for row in rows:
+            if isinstance(row.get("payload"), str) and len(row["payload"]) > 400:
+                row["payload"] = row["payload"][:397] + "..."
+        return {"events": rows, "count": len(rows)}
+
     else:
         raise HTTPException(status_code=400, detail=f"Unknown tool: {tool}")

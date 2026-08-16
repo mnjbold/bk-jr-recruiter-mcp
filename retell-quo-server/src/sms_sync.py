@@ -18,6 +18,7 @@ Pure-Python where possible. The Quo call is the only network I/O.
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -84,9 +85,16 @@ def sync_sms_threads(
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(days=window)
 
-    # Pull conversations from Quo
+    # Pull conversations from Quo — paginated so we don't silently cap at 20
+    # (the old `list_conversations(limit=20)` behaviour hid 95% of older threads).
+    convo_list: list[dict] = []
     try:
-        convo_list = agent.quo.list_conversations(phone_number_id or None) or []
+        convo_resp = agent.quo.list_conversations(
+            phone_number_id or None, limit=100,
+        ) if phone_number_id else agent.quo.list_conversations(
+            os.environ.get("QUO_BK_NUMBER_ID") or agent.quo.get_default_number_id(),
+            limit=100,
+        )
     except Exception as e:  # noqa: BLE001
         log.error("sync_sms_quo_list_failed", error=str(e))
         return {
@@ -94,6 +102,23 @@ def sync_sms_threads(
             "error": f"Quo list_conversations failed: {e}",
             "window_days": window,
         }
+
+    # New return shape is a dict with `data` (list) + `nextPageToken` (opt).
+    # Defensive: callers that still pass the old list-shaped Quo client must
+    # not crash, so we accept either.
+    if isinstance(convo_resp, dict):
+        convo_list = list(convo_resp.get("data") or [])
+    else:
+        convo_list = list(convo_resp or [])
+    if not convo_list and phone_number_id is None:
+        # Most likely QUO_BK_NUMBER_ID env not set; fall back to first number.
+        try:
+            fallback = agent.quo.list_conversations(
+                agent.quo.get_default_number_id(), limit=100,
+            )
+            convo_list = list((fallback or {}).get("data") or []) if isinstance(fallback, dict) else list(fallback or [])
+        except Exception:
+            pass
 
     created: list[dict] = []
     updated: list[dict] = []

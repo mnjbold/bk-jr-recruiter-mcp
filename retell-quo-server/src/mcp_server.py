@@ -157,12 +157,144 @@ def list_phone_numbers() -> dict:
 
 
 @mcp.tool()
-def list_conversations(phone_number_id: str = "") -> dict:
-    """List recent SMS conversations on the given OpenPhone number (defaults to BK's primary)."""
-    params = {}
+def list_conversations(
+    phone_number_id: str = "",
+    limit: int = 20,
+    page_token: str = "",
+) -> dict:
+    """
+    List recent SMS conversations on the given OpenPhone number (defaults to
+    BK's primary). Returns up to `limit` conversations (max 100 per call;
+    follow `next_page_token` to paginate through the full history).
+    """
+    params: dict = {"limit": max(1, min(int(limit), 100))}
     if phone_number_id:
         params["phone_number_id"] = phone_number_id
+    if page_token:
+        params["page_token"] = page_token
     return _call("list_conversations", params)
+
+
+@mcp.tool()
+def list_messages(
+    participant: str = "",
+    phone_number_id: str = "",
+    limit: int = 50,
+    page_token: str = "",
+) -> dict:
+    """
+    Read SMS message bodies (with direction: 'inbound' / 'outbound') for a
+    Quo number, optionally filtered to a single participant (E.164).
+
+    Closes the BK JR MCP's historical "no response body" gap — every message
+    returned includes its full `text` field plus delivery state, so you can
+    finally see what a candidate wrote. Paginated; pass `page_token` to
+    follow the cursor.
+    """
+    params: dict = {"limit": max(1, min(int(limit), 100))}
+    if participant:
+        params["participant"] = participant
+    if phone_number_id:
+        params["phone_number_id"] = phone_number_id
+    if page_token:
+        params["page_token"] = page_token
+    return _call("list_messages", params)
+
+
+@mcp.tool()
+def list_calls(
+    participant: str,
+    phone_number_id: str = "",
+    limit: int = 50,
+    page_token: str = "",
+) -> dict:
+    """
+    List voice calls between BK's Quo number and a single participant.
+    Quo's REST endpoint requires 1:1 (no bulk), so `participant` is mandatory.
+    """
+    params: dict = {"participant": participant, "limit": max(1, min(int(limit), 100))}
+    if phone_number_id:
+        params["phone_number_id"] = phone_number_id
+    if page_token:
+        params["page_token"] = page_token
+    return _call("list_calls", params)
+
+
+@mcp.tool()
+def get_call_transcript(call_id: str) -> dict:
+    """
+    Fetch transcript + metadata for a Retell (or Quo voice) call. Returns
+    utterances [{speaker, text, started_at}], call_analysis, recording_url.
+    Prefer Retell when available — its transcripts are richer.
+
+    Use this to read what a candidate said during screening — works for any
+    call id, even years-old, as long as Retell/Quo retains it.
+    """
+    return _call("get_call_transcript", {"call_id": call_id})
+
+
+@mcp.tool()
+def register_webhook(url: str = "", phone_number_id: str = "") -> dict:
+    """
+    Register a Quo webhook subscription so live inbound events (SMS received,
+    call completed, etc.) land at YOUR URL in real time.
+
+    Defaults: targets THIS backend's /webhook/quo (so events are stored in
+    the webhook_events log + push a GChat notification to BK). Override `url`
+    only for testing (e.g. ngrok/cloudflared) — a non-public URL will
+    silently fail to receive deliveries.
+    """
+    params: dict = {}
+    if url:
+        params["url"] = url
+    if phone_number_id:
+        params["phone_number_id"] = phone_number_id
+    return _call("register_webhook", params)
+
+
+@mcp.tool()
+def list_webhooks() -> dict:
+    """List Quo webhook subscriptions currently registered on BK's account."""
+    return _call("list_webhooks", {})
+
+
+@mcp.tool()
+def unregister_webhook(webhook_id: str) -> dict:
+    """
+    Remove a Quo webhook subscription. `webhook_id` comes from list_webhooks().
+    Idempotent — already-gone ids return ok=True.
+    """
+    return _call("unregister_webhook", {"webhook_id": webhook_id})
+
+
+@mcp.tool()
+def list_webhook_events(
+    limit: int = 50,
+    source: str = "",
+    phone: str = "",
+    since_seconds: int = 0,
+) -> dict:
+    """
+    Recent webhook event log — every Quo (SMS) + Retell (call) event the
+    backend has received since startup. Newest first.
+
+    Filters:
+      - `source`: 'quo' | 'retell' | empty (all)
+      - `phone`: exact E.164 match
+      - `since_seconds`: only events from the last N seconds (0 = no limit)
+
+    Each row includes the SMS body (or first 3 transcript utterances for
+    calls), the message/call id, and a truncated payload preview. Use this
+    instead of grepping structlog when answering "what did the candidate say?".
+    """
+    params: dict = {"limit": max(1, min(int(limit), 500))}
+    if source:
+        params["source"] = source
+    if phone:
+        params["phone"] = phone
+    if since_seconds and int(since_seconds) > 0:
+        params["since_seconds"] = int(since_seconds)
+    return _call("list_webhook_events", params)
 
 
 @mcp.tool()
